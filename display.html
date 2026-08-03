@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Now Playing</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 100%; height: 100%;
+    background: #0a0a12;
+    color: #fff;
+    font-family: "Segoe UI", "Yu Gothic UI", sans-serif;
+    overflow: hidden;
+  }
+  #app {
+    width: 100vw;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    background: radial-gradient(circle at 50% 40%, #1b1330 0%, #08060f 70%);
+  }
+
+  #status-badge {
+    font-size: 4vw;
+    letter-spacing: 0.3em;
+    color: #7de1ff;
+    margin-bottom: 3vh;
+    opacity: 0.9;
+    font-weight: 700;
+  }
+  #track-name {
+    font-size: 11vw;
+    font-weight: 800;
+    text-align: center;
+    line-height: 1.25;
+    max-width: 94%;
+    text-shadow: 0 0 40px rgba(125,225,255,0.5);
+    white-space: nowrap;
+  }
+
+  /* ビジュアライザー的なバー(疑似) */
+  #bars {
+    display: flex;
+    gap: 10px;
+    align-items: flex-end;
+    height: 14vh;
+    margin-top: 6vh;
+  }
+  #bars div {
+    width: 16px;
+    background: linear-gradient(to top, #7de1ff, #b98bff);
+    border-radius: 5px;
+    animation: bounce 1.2s ease-in-out infinite;
+  }
+  @keyframes bounce {
+    0%, 100% { height: 10%; }
+    50% { height: 90%; }
+  }
+  #app.paused #bars div { animation-play-state: paused; height: 15% !important; }
+
+  #conn-error {
+    position: fixed;
+    bottom: 2vh;
+    left: 2vw;
+    font-size: 1.6vw;
+    color: #ff6b6b;
+    opacity: 0;
+    transition: opacity 0.3s;
+  }
+  #conn-error.show { opacity: 1; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="status-badge">STOPPED</div>
+  <div id="track-name">-</div>
+  <div id="bars"></div>
+</div>
+<div id="conn-error">接続待機中... (main.py が起動しているか確認してください)</div>
+
+<script>
+const API_URL = "http://127.0.0.1:8787/now-playing";
+const POLL_MS = 700;
+
+const appEl = document.getElementById("app");
+const statusBadge = document.getElementById("status-badge");
+const trackName = document.getElementById("track-name");
+const connError = document.getElementById("conn-error");
+const barsEl = document.getElementById("bars");
+
+// 疑似ビジュアライザー用バーを生成
+const BAR_COUNT = 24;
+for (let i = 0; i < BAR_COUNT; i++) {
+  const bar = document.createElement("div");
+  bar.style.animationDelay = (Math.random() * 1.2).toFixed(2) + "s";
+  bar.style.animationDuration = (0.8 + Math.random() * 0.8).toFixed(2) + "s";
+  barsEl.appendChild(bar);
+}
+
+function fitTrackName() {
+  const maxWidth = appEl.clientWidth * 0.94;
+  trackName.style.fontSize = "";
+  let size = parseFloat(getComputedStyle(trackName).fontSize);
+  while (trackName.scrollWidth > maxWidth && size > 12) {
+    size -= 2;
+    trackName.style.fontSize = size + "px";
+  }
+}
+
+async function poll() {
+  try {
+    const res = await fetch(API_URL, { cache: "no-store" });
+    if (!res.ok) throw new Error("bad status");
+    const data = await res.json();
+    connError.classList.remove("show");
+
+    trackName.textContent = data.track.replace(/\.(mp3|wav|ogg)$/i, "");
+    statusBadge.textContent = data.playing ? "NOW PLAYING" : "PAUSED";
+    appEl.classList.toggle("paused", !data.playing);
+
+    fitTrackName();
+  } catch (e) {
+    connError.classList.add("show");
+  }
+}
+
+poll();
+setInterval(poll, POLL_MS);
+</script>
+</body>
+</html>

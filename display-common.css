@@ -1,0 +1,53 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body {
+  width: 100%; height: 100%;
+  background: #0a0a12;
+  color: #fff;
+  font-family: "Segoe UI", "Yu Gothic UI", sans-serif;
+  overflow: hidden;
+}
+#app {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  background: radial-gradient(circle at 50% 40%, #1b1330 0%, #08060f 70%);
+}
+/* #stage は「2画面ぶん」の仮想キャンバス。position:absoluteでモニターごとに左右へずらす */
+#stage {
+  position: absolute;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+}
+
+#status-badge {
+  font-size: 1.2vw;
+  letter-spacing: 0.3em;
+  color: #7de1ff;
+  margin-bottom: 1vh;
+  opacity: 0.9;
+  font-weight: 700;
+}
+#track-name {
+  font-size: 60vh;
+  font-weight: 800;
+  text-align: center;
+  line-height: 1;
+  white-space: nowrap;
+  text-shadow: 0 0 40px rgba(125,225,255,0.5);
+}
+
+#conn-error {
+  position: fixed;
+  bottom: 2vh;
+  left: 2vw;
+  font-size: 1.4vw;
+  color: #ff6b6b;
+  opacity: 0;
+  transition: opacity 0.3s;
+  z-index: 10;
+}
+#conn-error.show { opacity: 1; }
