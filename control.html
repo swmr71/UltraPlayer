@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>BGM Player - 管理画面 (OBSに映さないこと)</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 100%; height: 100%;
+    background: #101018;
+    color: #eee;
+    font-family: "Segoe UI", "Yu Gothic UI", sans-serif;
+  }
+  #warn {
+    background: #7a1f1f;
+    color: #fff;
+    text-align: center;
+    padding: 8px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+  }
+  #app {
+    display: flex;
+    flex-wrap: wrap;
+    height: auto;
+    min-height: calc(100vh - 40px);
+  }
+  .col {
+    flex: 1 1 280px;
+    min-width: 280px;
+    padding: 24px;
+    overflow-y: auto;
+  }
+  .col + .col { border-left: 1px solid rgba(255,255,255,0.08); }
+
+  h2 {
+    font-size: 14px;
+    color: #888;
+    letter-spacing: 0.15em;
+    margin-bottom: 14px;
+  }
+
+  #now-card {
+    background: rgba(125,225,255,0.06);
+    border: 1px solid rgba(125,225,255,0.2);
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 20px;
+  }
+  #status-badge {
+    display: inline-block;
+    font-size: 12px;
+    letter-spacing: 0.2em;
+    color: #7de1ff;
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+  #track-name {
+    font-size: 28px;
+    font-weight: 700;
+    word-break: break-all;
+  }
+  #index-line { margin-top: 6px; color: #999; font-size: 13px; }
+
+  #volume-wrap { margin-top: 16px; }
+  #volume-label {
+    display: flex; justify-content: space-between;
+    font-size: 12px; color: #999; margin-bottom: 6px;
+  }
+  #volume-track {
+    width: 100%; height: 8px; background: rgba(255,255,255,0.08);
+    border-radius: 4px; overflow: hidden;
+  }
+  #volume-fill {
+    height: 100%; background: linear-gradient(90deg, #7de1ff, #b98bff);
+    width: 50%; transition: width 0.4s ease;
+  }
+
+  #playlist { display: flex; flex-direction: column; gap: 6px; }
+  .track-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 12px; border-radius: 8px;
+    background: rgba(255,255,255,0.03);
+    font-size: 13px; color: #aaa;
+  }
+  .track-row.active { background: rgba(125,225,255,0.14); color: #fff; }
+  .track-num { opacity: 0.5; width: 2ch; }
+
+  #meta {
+    margin-top: 24px;
+    font-size: 12px;
+    color: #666;
+    line-height: 1.8;
+  }
+  #meta b { color: #999; }
+
+  .col:nth-child(3) { max-width: 340px; }
+  @media (max-width: 640px) {
+    .col { max-width: 100% !important; border-left: none !important; border-top: 1px solid rgba(255,255,255,0.08); }
+    #track-name { font-size: 20px; }
+  }
+
+  #conn-dot {
+    display: inline-block;
+    width: 9px; height: 9px; border-radius: 50%;
+    background: #e04545; margin-right: 6px;
+  }
+  #conn-dot.ok { background: #4ade80; }
+
+  .monitor-card {
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 12px;
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+  .monitor-card h3 {
+    font-size: 13px;
+    color: #7de1ff;
+    letter-spacing: 0.1em;
+    margin-bottom: 12px;
+  }
+  .field-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+    font-size: 13px;
+    color: #bbb;
+  }
+  .field-row label { width: 8em; flex-shrink: 0; }
+  .field-row input[type="number"] {
+    width: 6em;
+    padding: 6px 8px;
+    border-radius: 6px;
+    border: 1px solid rgba(255,255,255,0.15);
+    background: #14121f;
+    color: #fff;
+    font-size: 13px;
+  }
+  .stepper {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .stepper button {
+    width: 30px; height: 30px;
+    border-radius: 6px;
+    border: 1px solid rgba(125,225,255,0.3);
+    background: rgba(125,225,255,0.1);
+    color: #7de1ff;
+    font-size: 16px;
+    cursor: pointer;
+  }
+  .stepper button:hover { background: rgba(125,225,255,0.2); }
+  .stepper button:active { transform: scale(0.95); }
+  .stepper .val {
+    width: 4.5em;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+  }
+  .save-hint {
+    font-size: 11px;
+    color: #666;
+    margin-top: 4px;
+  }
+</style>
+</head>
+<body>
+<div id="warn">⚠ この画面は操作者用です。OBSのシーンには追加しないでください(monitor1.html / monitor2.html を配信用に使ってください)</div>
+<div id="app">
+  <div class="col">
+    <h2>NOW PLAYING</h2>
+    <div id="now-card">
+      <div id="status-badge">STOPPED</div>
+      <div id="track-name">-</div>
+      <div id="index-line"></div>
+      <div id="volume-wrap">
+        <div id="volume-label"><span>VOLUME</span><span id="volume-value">50%</span></div>
+        <div id="volume-track"><div id="volume-fill"></div></div>
+      </div>
+    </div>
+    <div id="meta">
+      <span id="conn-dot"></span><span id="conn-text">接続待機中...</span><br><br>
+      <b>API:</b> http://127.0.0.1:8787/now-playing<br>
+      <b>操作:</b> main.py側でハンドサイン / 音声コマンド<br>
+      <b>配信用画面:</b> monitor1.html (左) / monitor2.html (右) を各モニターでフルスクリーン表示 → OBSでは Browser Source 推奨<br>
+      <b>配信画面の調整:</b> 右のパネルから調整します(monitor1/2.html側では操作不要)
+    </div>
+  </div>
+  <div class="col">
+    <h2>PLAYLIST</h2>
+    <div id="playlist"></div>
+  </div>
+  <div class="col">
+    <h2>配信画面の位置調整</h2>
+
+    <div class="monitor-card">
+      <h3>MONITOR 1 (左)</h3>
+      <div class="field-row">
+        <label for="m1-height">画面の高さ(cm)</label>
+        <input type="number" id="m1-height" step="0.1" min="5" max="500" placeholder="定規で測定">
+      </div>
+      <div class="field-row">
+        <label>上下位置</label>
+        <div class="stepper">
+          <button data-monitor="1" data-delta="-10">▲▲</button>
+          <button data-monitor="1" data-delta="-2">▲</button>
+          <span class="val" id="m1-yval">0px</span>
+          <button data-monitor="1" data-delta="2">▼</button>
+          <button data-monitor="1" data-delta="10">▼▼</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="monitor-card">
+      <h3>MONITOR 2 (右)</h3>
+      <div class="field-row">
+        <label for="m2-height">画面の高さ(cm)</label>
+        <input type="number" id="m2-height" step="0.1" min="5" max="500" placeholder="定規で測定">
+      </div>
+      <div class="field-row">
+        <label>上下位置</label>
+        <div class="stepper">
+          <button data-monitor="2" data-delta="-10">▲▲</button>
+          <button data-monitor="2" data-delta="-2">▲</button>
+          <span class="val" id="m2-yval">0px</span>
+          <button data-monitor="2" data-delta="2">▼</button>
+          <button data-monitor="2" data-delta="10">▼▼</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="save-hint">
+      高さ(cm)は定規で画面を測って入力(Enterまたはフォーカスを外すと反映)。<br>
+      上下位置はボタンで微調整、両画面とも約0.5〜1秒でmonitor1/2.htmlに反映されます。
+    </div>
+  </div>
+</div>
+
+<script>
+const API_URL = "http://127.0.0.1:8787/now-playing";
+const CALIB_URL = "http://127.0.0.1:8787/calib";
+const POLL_MS = 700;
+
+const statusBadge = document.getElementById("status-badge");
+const trackName = document.getElementById("track-name");
+const indexLine = document.getElementById("index-line");
+const volumeFill = document.getElementById("volume-fill");
+const volumeValue = document.getElementById("volume-value");
+const playlistEl = document.getElementById("playlist");
+const connDot = document.getElementById("conn-dot");
+const connText = document.getElementById("conn-text");
+
+function renderPlaylist(data) {
+  const names = data.tracks || [];
+  playlistEl.innerHTML = "";
+  const total = data.total_tracks || names.length;
+  for (let i = 0; i < total; i++) {
+    const row = document.createElement("div");
+    row.className = "track-row" + (i === data.index ? " active" : "");
+    const name = names[i] || `Track ${i + 1}`;
+    row.innerHTML = `<span class="track-num">${String(i + 1).padStart(2, "0")}</span><span>${name}</span>`;
+    playlistEl.appendChild(row);
+  }
+}
+
+async function poll() {
+  try {
+    const res = await fetch(API_URL, { cache: "no-store" });
+    if (!res.ok) throw new Error("bad status");
+    const data = await res.json();
+
+    connDot.classList.add("ok");
+    connText.textContent = "接続中";
+
+    trackName.textContent = data.track;
+    statusBadge.textContent = data.playing ? "NOW PLAYING" : "PAUSED";
+    indexLine.textContent = `Track ${data.index + 1} / ${data.total_tracks}`;
+
+    const volPct = Math.round(data.volume * 100);
+    volumeFill.style.width = volPct + "%";
+    volumeValue.textContent = volPct + "%";
+
+    renderPlaylist(data);
+  } catch (e) {
+    connDot.classList.remove("ok");
+    connText.textContent = "未接続 (main.py が起動しているか確認してください)";
+  }
+}
+
+poll();
+setInterval(poll, POLL_MS);
+
+// --- 配信画面(monitor1/2.html)の位置調整 ---
+const calibState = {
+  1: { heightCm: null, yOffsetPx: 0 },
+  2: { heightCm: null, yOffsetPx: 0 },
+};
+const heightInputs = { 1: document.getElementById("m1-height"), 2: document.getElementById("m2-height") };
+const yValEls = { 1: document.getElementById("m1-yval"), 2: document.getElementById("m2-yval") };
+
+function renderCalib() {
+  for (const m of [1, 2]) {
+    if (document.activeElement !== heightInputs[m]) {
+      heightInputs[m].value = calibState[m].heightCm ?? "";
+    }
+    yValEls[m].textContent = `${calibState[m].yOffsetPx}px`;
+  }
+}
+
+async function postCalib(monitor, patch) {
+  try {
+    const res = await fetch(CALIB_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ monitor, ...patch }),
+    });
+    const data = await res.json();
+    if (data[String(monitor)]) {
+      calibState[monitor] = data[String(monitor)];
+      renderCalib();
+    }
+  } catch (e) {
+    // main.pyが起動していない場合は静かに失敗させる (通常のpoll()側でエラー表示済み)
+  }
+}
+
+async function pollCalib() {
+  try {
+    const res = await fetch(CALIB_URL, { cache: "no-store" });
+    if (!res.ok) return;
+    const data = await res.json();
+    for (const m of [1, 2]) {
+      if (data[m]) calibState[m] = data[m];
+    }
+    renderCalib();
+  } catch (e) {
+    // 未接続時は何もしない
+  }
+}
+
+for (const m of [1, 2]) {
+  heightInputs[m].addEventListener("change", () => {
+    const v = parseFloat(heightInputs[m].value);
+    if (v && v > 5 && v < 500) {
+      postCalib(m, { heightCm: v });
+    }
+  });
+}
+
+document.querySelectorAll(".stepper button").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const m = parseInt(btn.dataset.monitor, 10);
+    const delta = parseInt(btn.dataset.delta, 10);
+    const next = (calibState[m].yOffsetPx || 0) + delta;
+    calibState[m].yOffsetPx = next;
+    yValEls[m].textContent = `${next}px`;
+    postCalib(m, { yOffsetPx: next });
+  });
+});
+
+pollCalib();
+setInterval(pollCalib, POLL_MS);
+</script>
+</body>
+</html>

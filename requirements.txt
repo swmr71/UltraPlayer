@@ -1,6 +1,7 @@
 opencv-python
 mediapipe==0.10.21
 pygame
+Pillow
 
 vosk
 pyaudio

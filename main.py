@@ -40,6 +40,50 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import cv2
 import mediapipe as mp
 import pygame
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+
+
+# ------------------------------------------------------------
+# 日本語テキスト描画 (cv2.putTextは日本語グリフを描画できず ??? になるため、
+# PILで日本語フォントを使って描画してからcv2の画像に戻す)
+# ------------------------------------------------------------
+_JP_FONT_CANDIDATES = [
+    r"C:\Windows\Fonts\meiryo.ttc",
+    r"C:\Windows\Fonts\YuGothM.ttc",
+    r"C:\Windows\Fonts\msgothic.ttc",
+    "/System/Library/Fonts/ヒラギノ角ゴシック W4.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+]
+_jp_font_cache = {}
+
+
+def _get_jp_font(size: int):
+    if size in _jp_font_cache:
+        return _jp_font_cache[size]
+    font = None
+    for path in _JP_FONT_CANDIDATES:
+        if os.path.isfile(path):
+            try:
+                font = ImageFont.truetype(path, size)
+                break
+            except Exception:
+                continue
+    if font is None:
+        font = ImageFont.load_default()
+    _jp_font_cache[size] = font
+    return font
+
+
+def draw_text_ja(frame, text: str, org, font_size: int = 24, color=(255, 255, 255)):
+    """日本語を含むテキストをBGR画像(cv2のframe)に描画するヘルパー"""
+    pil_img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(pil_img)
+    font = _get_jp_font(font_size)
+    rgb_color = (color[2], color[1], color[0])
+    draw.text(org, text, font=font, fill=rgb_color)
+    result = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+    frame[:] = result
 
 
 # ------------------------------------------------------------
@@ -285,6 +329,7 @@ class BGMPlayer:
             "volume": round(self.volume, 2),
             "index": self.index,
             "total_tracks": len(self.tracks),
+            "tracks": [os.path.basename(t) for t in self.tracks],
         }
 
     def toggle_play_pause(self):
@@ -330,24 +375,107 @@ class BGMPlayer:
 
 
 # ------------------------------------------------------------
-# 現在再生中の曲情報を外部から取得するための簡易HTTP API
+# monitor1.html / monitor2.html の物理サイズキャリブレーション状態
+# OBSのBrowser Source (別プロセスのブラウザ) はlocalStorageやBroadcastChannelを
+# 制御画面と共有できないため、main.py側のHTTP APIを経由して状態をやり取りする。
+# control.html から書き込み、monitor1/2.html はポーリングで読み取って反映する。
+# ------------------------------------------------------------
+class CalibStore:
+    FILE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "calib_state.json")
+    DEFAULT = {
+        "1": {"heightCm": None, "yOffsetPx": 0},
+        "2": {"heightCm": None, "yOffsetPx": 0},
+    }
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.state = dict(self.DEFAULT)
+        self._load()
+
+    def _load(self):
+        if os.path.isfile(self.FILE_PATH):
+            try:
+                with open(self.FILE_PATH, "r", encoding="utf-8") as f:
+                    saved = json.load(f)
+                for key in ("1", "2"):
+                    if key in saved:
+                        self.state[key].update(saved[key])
+            except Exception:
+                pass
+
+    def _save(self):
+        try:
+            with open(self.FILE_PATH, "w", encoding="utf-8") as f:
+                json.dump(self.state, f, ensure_ascii=False)
+        except Exception:
+            pass
+
+    def get(self):
+        with self.lock:
+            return json.loads(json.dumps(self.state))
+
+    def update(self, monitor: str, patch: dict):
+        with self.lock:
+            if monitor not in self.state:
+                return None
+            for key in ("heightCm", "yOffsetPx"):
+                if key in patch:
+                    self.state[monitor][key] = patch[key]
+            self._save()
+            return json.loads(json.dumps(self.state))
+
+
+# ------------------------------------------------------------
+# 現在再生中の曲情報 & キャリブレーション状態を外部から取得/更新するための簡易HTTP API
 # ------------------------------------------------------------
 def make_now_playing_server(player: "BGMPlayer", port: int) -> ThreadingHTTPServer:
-    """GET /now-playing で player.status() のJSONを返すHTTPサーバーを作る"""
+    """GET /now-playing で player.status()、GET/POST /calib でキャリブレーション状態を扱うHTTPサーバーを作る"""
+
+    calib_store = CalibStore()
 
     class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            if self.path not in ("/", "/now-playing"):
-                self.send_response(404)
-                self.end_headers()
-                return
-            body = json.dumps(player.status(), ensure_ascii=False).encode("utf-8")
-            self.send_response(200)
+        def _send_json(self, obj, status=200):
+            body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+            self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+        def do_OPTIONS(self):
+            self.send_response(204)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.end_headers()
+
+        def do_GET(self):
+            if self.path in ("/", "/now-playing"):
+                self._send_json(player.status())
+            elif self.path == "/calib":
+                self._send_json(calib_store.get())
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def do_POST(self):
+            if self.path != "/calib":
+                self.send_response(404)
+                self.end_headers()
+                return
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                raw = self.rfile.read(length) if length else b"{}"
+                payload = json.loads(raw.decode("utf-8"))
+                monitor = str(payload.get("monitor"))
+                updated = calib_store.update(monitor, payload)
+                if updated is None:
+                    self._send_json({"error": "invalid monitor"}, status=400)
+                else:
+                    self._send_json(updated)
+            except Exception as e:
+                self._send_json({"error": str(e)}, status=400)
 
         def log_message(self, format, *args):
             pass  # コンソールを汚さないようアクセスログは出さない
@@ -461,14 +589,14 @@ def main():
                 voice_command = command_queue.get_nowait()
                 status_text = apply_command(player, voice_command, prefix="VOICE")
 
-            # 画面にステータス表示
+            # 画面にステータス表示 (日本語ファイル名も文字化けしないようPILで描画)
             cv2.rectangle(frame, (0, 0), (frame.shape[1], 70), (0, 0, 0), -1)
-            cv2.putText(frame, f"Track: {player.current_name()}", (10, 25),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-            cv2.putText(frame, f"Status: {status_text}  Vol: {int(player.volume * 100)}%", (10, 55),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            draw_text_ja(frame, f"Track: {player.current_name()}", (10, 8),
+                         font_size=20, color=(255, 255, 255))
+            draw_text_ja(frame, f"Status: {status_text}  Vol: {int(player.volume * 100)}%", (10, 38),
+                         font_size=20, color=(0, 255, 0))
 
-            cv2.imshow("BGM Hand Sign Player (qで終了)", frame)
+            cv2.imshow("BGM Hand Sign Player (q to quit)", frame)
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
 
