@@ -14,7 +14,10 @@ Windowsでmp3再生時に問題が出る場合は、SDL2周りの依存が必要
 ## 使い方
 
 1. `tracks` フォルダに再生したいmp3ファイルを入れる
-   (ファイル名の昇順で再生リストになります)
+   (ファイル名の昇順で再生リストになります)。
+   [bgm-library](#bgm-library-曲のアップロードid管理) アプリでアップロードした曲は
+   `tracks/tracks.json` に曲名・表示用曲名(伏字対応)・作者などのメタデータ付きで
+   自動的に登録されます(こちらが優先して読み込まれます)。
 
 2. 実行:
 
@@ -37,12 +40,16 @@ python main.py --dir ./tracks
 
 ## 音声コマンド (任意)
 
-ジェスチャーに加えて、声でも操作できます。
+ジェスチャーに加えて、声でも操作できます。[Vosk](https://alphacephei.com/vosk/) による
+オフライン音声認識を使っているため、ネット接続は不要です。
 
 ```bash
-pip install SpeechRecognition pyaudio
+pip install vosk pyaudio
 python main.py --dir ./tracks --voice
 ```
+
+日本語モデル `vosk-model-small-ja-0.22` を [alphacephei.com/vosk/models](https://alphacephei.com/vosk/models)
+からダウンロードし、`models/vosk-model-small-ja-0.22` に配置してください。
 
 | 発話例 | 動作 |
 |---|---|
@@ -54,7 +61,8 @@ python main.py --dir ./tracks --voice
 | 「音量上げ」「大きく」 | 音量アップ |
 | 「音量下げ」「小さく」 | 音量ダウン |
 
-- Google音声認識APIを使うのでネット接続が必要です(無料枠)。
+- 認識対象は上記コマンドの単語だけに絞った語彙制約(グラマー)をかけているため、
+  関係ない言葉に惑わされにくくなっています。
 - ジェスチャーと音声は同時に使えます。両方同時にコマンドが来ても、
   内部的には同じキューで順番に処理されるので競合しません。
 - `pyaudio` はOS依存のビルドが必要な場合があります。
@@ -65,13 +73,35 @@ python main.py --dir ./tracks --voice
 ## オプション
 
 ```bash
-python main.py --dir ./tracks --camera 0 --cooldown 1.0 --voice --api-port 8787
+python main.py --dir ./tracks --camera 0 --cooldown 1.0 --voice --api-port 8787 --program program.json
 ```
 
 - `--camera`: 複数カメラがある場合のデバイス番号 (デフォルト 0)
 - `--cooldown`: 同じジェスチャーを連続で誤爆させないための待ち時間(秒)
 - `--voice`: 音声コマンドを有効化
 - `--api-port`: 現在再生中の曲情報とキャリブレーション状態を提供するHTTP APIのポート (デフォルト 8787、0で無効化)
+- `--program`: 行事の次第(演目リスト)を定義したJSONファイル。指定すると `N` キーで
+  次の項目に進行できる (下記「行事の次第と連動させる」参照)
+
+## 行事の次第と連動させる (発表会・学芸会向け)
+
+劇や演奏など、BGMを流さずに進行する項目が混ざる行事向けの機能です。
+
+```bash
+python main.py --dir ./tracks --program program.json
+```
+
+`N` キーを押すたびに次の項目へ進みます。項目にBGM(プレイリスト)が設定されて
+いれば「転換中」としてそのBGMを順番に再生し(最後まで流れたら先頭に戻って
+ループ)、もう一度 `N` を押すとBGMが止まり「上演中」に切り替わります。BGMが
+無い項目はそのまま即座に「上演中」になります。
+
+`--program` 指定時は `/now-playing` の内容も変わり、上演中は項目名のみ、
+転換中は次の項目名と再生中BGMを返します(詳しくは下記API表を参照)。
+
+`program.json` は手で書かず、[bgm-library](#bgm-library-曲のアップロードid管理)
+アプリのUIから発表項目にライブラリの曲を割り当てて保存してください
+(サンプル: [program.example.json](program.example.json))。
 
 ## 配信用画面 (monitor1.html / monitor2.html)
 
@@ -130,13 +160,43 @@ http://127.0.0.1:8000/control.html
 (モニター側での操作は不要です。OBSのBrowser Source内は直接操作できないため、
 このような「管理画面から遠隔で調整する」方式にしています)。
 
+## bgm-library (曲のアップロード・ID管理)
+
+BGMファイルをアップロードするとUUIDをファイル名にして保存し、曲名とは別に
+「表示用曲名」(タイトルの一部を伏字にできる。例: `YAJU&U` → `■■■■&U`)・
+作者・「当方でBGM化(編集・二次利用)した音源」の注記を管理できるNode.jsアプリです。
+[行事の次第](#行事の次第と連動させる-発表会・学芸会向け)への曲の割り当ても
+ここから行います。
+
+```bash
+cd bgm-library
+npm install
+cp .env.example .env   # 必要に応じて編集 (後述)
+npm start
+```
+
+`http://localhost:4000` にアクセスすると管理画面が開きます。
+
+- 曲を追加: 音源ファイル + 曲名を入力してアップロード。`../tracks/` にUUIDファイル名
+  で保存され、`../tracks/tracks.json` にメタデータが記録されます。
+- 作者検索補助: [last.fm](https://www.lastfm.jp/api/account/create) の無料APIキーを
+  `.env` の `LASTFM_API_KEY` に設定すると、曲名から作者候補を検索できます
+  (魔王魂などのフリーBGM素材は商用配信されていないため基本的にヒットしません。
+  市販曲を使う場合の検索補助として使えます)。
+- 行事の次第: 発表項目を追加し、各項目にライブラリの曲をプレイリストとして
+  複数割り当てられます(`../program.json` に保存され、`main.py --program` が
+  読み込みます)。
+
+`.env` の `TRACKS_DIR` / `PROGRAM_FILE` は、`main.py` の `--dir` / `--program` と
+同じ場所を指すようにしてください(デフォルトは `../tracks` / `../program.json`)。
+
 ## ローカルAPI
 
 `main.py` 実行中、以下のエンドポイントが `http://127.0.0.1:8787` で提供されます。
 
 | エンドポイント | メソッド | 内容 |
 |---|---|---|
-| `/now-playing` | GET | 現在の再生状態 (`track`, `playing`, `volume`, `index`, `total_tracks`, `tracks`) |
+| `/now-playing` | GET | `--program` 未指定時: 現在の再生状態 (`track`, `playing`, `volume`, `index`, `total_tracks`)。`--program` 指定時: 上演中なら `{"mode": "performing", "current_item": "..."}`、転換中なら `{"mode": "transition", "next_item": "...", "bgm": {"title": ..., "author": ..., "arranged": ...}}` |
 | `/calib` | GET | モニター1・2のキャリブレーション状態 (`heightCm`, `yOffsetPx`) |
 | `/calib` | POST | キャリブレーション状態の更新。Body例: `{"monitor": "1", "heightCm": 30}` |
 

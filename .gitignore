@@ -219,3 +219,14 @@ __marimo__/
 
 # Vosk speech recognition model (download separately, see main.py header)
 models/
+
+# bgm-library (Node app): deps and secrets
+bgm-library/node_modules/
+bgm-library/.env
+
+# アップロードされた音源本体とライブラリ台帳、行事の次第 (本番ごとに変わるデータ)
+tracks/*.mp3
+tracks/*.wav
+tracks/*.ogg
+tracks/tracks.json
+program.json

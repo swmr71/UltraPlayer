@@ -23,6 +23,23 @@ Webカメラでハンドサインを認識してBGMを操作するプレイヤ�
 使い方:
     python main.py --dir ./tracks
     python main.py --dir ./tracks --voice
+    python main.py --dir ./tracks --program program.json   # 行事の次第と連動 (Nキーで次の項目へ)
+
+行事の次第(演目リスト)と連動させる場合:
+    --program で program.json のようなファイルを指定すると、Nキーで次の項目に
+    進行できる。項目にBGMが指定されていれば転換中としてそのBGMを再生し、
+    もう一度Nキーを押すと上演中(BGM停止)に切り替わる。
+    /now-playing API は、上演中は項目名のみ、転換中は次の項目名+再生中BGMを返す。
+    詳しくは program.example.json を参照。
+
+    BGMはtracks.jsonの曲id (UUID) で指定する。tracks.json や、発表項目への
+    曲割り当ては手で書かず、bgm-library/ の管理アプリ (Node.js) から行う。
+        cd bgm-library
+        npm install
+        npm start
+    で http://localhost:4000 が起動し、曲のアップロード・作者/伏字タイトルの
+    編集・行事の次第への割り当てができる (TRACKS_DIR/PROGRAM_FILE を
+    main.py の --dir / --program と同じ場所に向けておくこと)。
 """
 
 import argparse
@@ -297,43 +314,107 @@ class VoiceController:
 # BGMプレイヤー本体
 # ------------------------------------------------------------
 class BGMPlayer:
+    """音源を管理して再生するクラス。
+
+    track_dir に tracks.json (bgm-library アプリが書き出すライブラリ台帳) が
+    あればそれを読み込み、id・曲名・表示用曲名(伏字対応)・作者・「当方でBGM化した
+    二次利用」注記を持つ構造化データとして扱う。tracks.json が無い場合は従来通り
+    フォルダ内の mp3/wav/ogg を素朴に列挙する (曲名などのメタデータは無し)。
+    """
+
     def __init__(self, track_dir: str):
         pygame.mixer.init()
-        self.tracks = sorted(
-            glob.glob(os.path.join(track_dir, "*.mp3"))
-            + glob.glob(os.path.join(track_dir, "*.wav"))
-            + glob.glob(os.path.join(track_dir, "*.ogg"))
-        )
-        if not self.tracks:
+        self.track_dir = track_dir
+        self.library = self._load_library(track_dir)
+        if not self.library:
             print(f"[警告] {track_dir} に音源ファイルが見つかりません (mp3/wav/ogg)")
         self.index = 0
         self.volume = 0.5
         self.playing = False
         pygame.mixer.music.set_volume(self.volume)
-        if self.tracks:
+        if self.library:
             self._load_current()
 
+    @staticmethod
+    def _load_library(track_dir: str):
+        manifest_path = os.path.join(track_dir, "tracks.json")
+        if os.path.isfile(manifest_path):
+            try:
+                with open(manifest_path, "r", encoding="utf-8") as f:
+                    entries = json.load(f)
+                library = []
+                for e in entries:
+                    path = os.path.join(track_dir, e["filename"])
+                    if not os.path.isfile(path):
+                        print(f"[警告] tracks.jsonに記載のファイルが見つかりません: {e['filename']}")
+                        continue
+                    library.append({
+                        "id": e["id"],
+                        "path": path,
+                        "title": e.get("title", e["filename"]),
+                        "displayTitle": e.get("displayTitle") or e.get("title", e["filename"]),
+                        "author": e.get("author", ""),
+                        "arranged": bool(e.get("arranged", False)),
+                        "note": e.get("note", ""),
+                    })
+                return library
+            except Exception as e:
+                print(f"[警告] tracks.jsonの読み込みに失敗しました: {e}")
+
+        # tracks.json が無い場合は従来通りフォルダを素朴に列挙する (後方互換)
+        paths = sorted(
+            glob.glob(os.path.join(track_dir, "*.mp3"))
+            + glob.glob(os.path.join(track_dir, "*.wav"))
+            + glob.glob(os.path.join(track_dir, "*.ogg"))
+        )
+        return [
+            {
+                "id": os.path.splitext(os.path.basename(p))[0],
+                "path": p,
+                "title": os.path.basename(p),
+                "displayTitle": os.path.basename(p),
+                "author": "",
+                "arranged": False,
+                "note": "",
+            }
+            for p in paths
+        ]
+
     def _load_current(self):
-        pygame.mixer.music.load(self.tracks[self.index])
+        pygame.mixer.music.load(self.library[self.index]["path"])
+
+    def current_track(self):
+        if not self.library:
+            return None
+        return self.library[self.index]
 
     def current_name(self):
-        if not self.tracks:
-            return "(no track)"
-        return os.path.basename(self.tracks[self.index])
+        """画面/API表示用の曲名 (伏字対応済みのdisplayTitle) を返す"""
+        track = self.current_track()
+        return track["displayTitle"] if track else "(no track)"
+
+    def current_public(self) -> dict:
+        """外部公開してよい範囲の現在曲情報 (内部title/ファイルパスは含めない)"""
+        track = self.current_track()
+        if not track:
+            return {"title": "(no track)", "author": "", "arranged": False}
+        info = {"title": track["displayTitle"], "author": track["author"], "arranged": track["arranged"]}
+        if track["note"]:
+            info["note"] = track["note"]
+        return info
 
     def status(self) -> dict:
         """現在の再生状態をJSON化しやすい辞書で返す (外部API公開用)"""
         return {
-            "track": self.current_name(),
+            "track": self.current_public(),
             "playing": self.playing,
             "volume": round(self.volume, 2),
             "index": self.index,
-            "total_tracks": len(self.tracks),
-            "tracks": [os.path.basename(t) for t in self.tracks],
+            "total_tracks": len(self.library),
         }
 
     def toggle_play_pause(self):
-        if not self.tracks:
+        if not self.library:
             return
         if self.playing:
             pygame.mixer.music.pause()
@@ -350,17 +431,17 @@ class BGMPlayer:
         self.playing = False
 
     def next_track(self):
-        if not self.tracks:
+        if not self.library:
             return
-        self.index = (self.index + 1) % len(self.tracks)
+        self.index = (self.index + 1) % len(self.library)
         self._load_current()
         pygame.mixer.music.play()
         self.playing = True
 
     def prev_track(self):
-        if not self.tracks:
+        if not self.library:
             return
-        self.index = (self.index - 1) % len(self.tracks)
+        self.index = (self.index - 1) % len(self.library)
         self._load_current()
         pygame.mixer.music.play()
         self.playing = True
@@ -372,6 +453,103 @@ class BGMPlayer:
     def volume_down(self):
         self.volume = max(0.0, self.volume - 0.1)
         pygame.mixer.music.set_volume(self.volume)
+
+    def play_by_id(self, track_id: str) -> bool:
+        """曲idを指定して再生する (行事プログラムの転換BGM用)"""
+        for i, t in enumerate(self.library):
+            if t["id"] == track_id:
+                self.index = i
+                self._load_current()
+                pygame.mixer.music.play()
+                self.playing = True
+                return True
+        return False
+
+
+# ------------------------------------------------------------
+# 行事の次第(演目リスト)を管理し、BGMプレイヤーと連動させるクラス
+# program.json 形式:
+#   [
+#     {"name": "開会の言葉", "bgm": []},
+#     {"name": "劇『桃太郎』", "bgm": ["3fa2c1e4-....", "9b7e...."]},
+#     {"name": "合唱", "bgm": []}
+#   ]
+# "bgm" はライブラリ(tracks.json)の曲idの配列(プレイリスト)。bgm-library アプリの
+# UIから発表項目に曲を割り当てて保存すると、この形式で書き出される。
+# "bgm" が1曲以上ある項目は、その項目へ転換する際に指定BGMを順番に再生し、
+# 最後まで再生し終えたら先頭に戻ってループする(Nキーで転換完了するまで無音にしない)。
+# 空配列 [] の項目はBGMなしで上演される(劇・演奏など)。
+# ------------------------------------------------------------
+class ProgramController:
+    def __init__(self, path: str, player: "BGMPlayer"):
+        with open(path, "r", encoding="utf-8") as f:
+            self.items = json.load(f)
+        if not self.items:
+            raise RuntimeError(f"{path} に項目がありません")
+        self.player = player
+        self.current_idx = 0
+        self.target_idx = None
+        self.mode = "performing"  # "performing"(上演中・BGMなし) | "transition"(転換中・BGM再生)
+        self.bgm_queue = []
+        self.bgm_pos = 0
+
+    @staticmethod
+    def _bgm_ids(item: dict):
+        bgm = item.get("bgm") or []
+        if isinstance(bgm, str):
+            bgm = [bgm]
+        return bgm
+
+    def advance(self) -> str:
+        if self.mode == "transition":
+            self.player.stop()
+            self.bgm_queue = []
+            self.bgm_pos = 0
+            self.current_idx = self.target_idx
+            self.target_idx = None
+            self.mode = "performing"
+            return f"[PROGRAM] 上演開始: {self.items[self.current_idx]['name']}"
+
+        next_idx = self.current_idx + 1
+        if next_idx >= len(self.items):
+            return "[PROGRAM] 次第は最後の項目です"
+
+        next_item = self.items[next_idx]
+        bgm_ids = self._bgm_ids(next_item)
+        if bgm_ids:
+            self.bgm_queue = bgm_ids
+            self.bgm_pos = 0
+            if not self.player.play_by_id(self.bgm_queue[0]):
+                print(f"[警告] ライブラリに該当曲が見つかりません (id={self.bgm_queue[0]})")
+            self.target_idx = next_idx
+            self.mode = "transition"
+            return f"[PROGRAM] 転換中 -> {next_item['name']}"
+        else:
+            self.current_idx = next_idx
+            return f"[PROGRAM] 上演開始: {next_item['name']}"
+
+    def tick(self):
+        """転換中のBGMが最後まで再生し終わったら次の曲へ自動的に進める。
+        末尾まで行ったら先頭に戻ってループする。メインループから毎フレーム呼び出す想定。
+        """
+        if self.mode != "transition" or not self.bgm_queue:
+            return
+        if pygame.mixer.music.get_busy():
+            return
+        self.bgm_pos = (self.bgm_pos + 1) % len(self.bgm_queue)
+        self.player.play_by_id(self.bgm_queue[self.bgm_pos])
+
+    def status(self) -> dict:
+        if self.mode == "transition":
+            return {
+                "mode": "transition",
+                "next_item": self.items[self.target_idx]["name"],
+                "bgm": self.player.current_public(),
+            }
+        return {
+            "mode": "performing",
+            "current_item": self.items[self.current_idx]["name"],
+        }
 
 
 # ------------------------------------------------------------
@@ -428,8 +606,13 @@ class CalibStore:
 # ------------------------------------------------------------
 # 現在再生中の曲情報 & キャリブレーション状態を外部から取得/更新するための簡易HTTP API
 # ------------------------------------------------------------
-def make_now_playing_server(player: "BGMPlayer", port: int) -> ThreadingHTTPServer:
-    """GET /now-playing で player.status()、GET/POST /calib でキャリブレーション状態を扱うHTTPサーバーを作る"""
+def make_now_playing_server(player: "BGMPlayer", port: int, program: "ProgramController" = None) -> ThreadingHTTPServer:
+    """GET /now-playing で現在状態、GET/POST /calib でキャリブレーション状態を扱うHTTPサーバーを作る
+
+    program が指定されている場合、/now-playing は行事次第の進行状況
+    (上演中なら項目名のみ、転換中なら次の項目名+再生中BGM) を返す。
+    未指定の場合は従来通り player.status() を返す。
+    """
 
     calib_store = CalibStore()
 
@@ -452,7 +635,7 @@ def make_now_playing_server(player: "BGMPlayer", port: int) -> ThreadingHTTPServ
 
         def do_GET(self):
             if self.path in ("/", "/now-playing"):
-                self._send_json(player.status())
+                self._send_json(program.status() if program else player.status())
             elif self.path == "/calib":
                 self._send_json(calib_store.get())
             else:
@@ -517,10 +700,19 @@ def main():
     parser.add_argument("--cooldown", type=float, default=1.0, help="同一ジェスチャーの連続発火防止秒数")
     parser.add_argument("--voice", action="store_true", help="音声コマンドも有効化する (要 vosk, pyaudio)")
     parser.add_argument("--api-port", type=int, default=8787, help="現在再生中の曲情報を返すHTTP APIのポート (0で無効化)")
+    parser.add_argument("--program", type=str, default=None, help="行事の次第(演目リスト)を定義したJSONファイル。指定するとNキーで項目を進行できる")
     args = parser.parse_args()
 
     player = BGMPlayer(args.dir)
     recognizer = GestureRecognizer(cooldown_sec=args.cooldown)
+
+    program = None
+    if args.program:
+        try:
+            program = ProgramController(args.program, player)
+            print(f"[PROGRAM] {args.program} を読み込みました ({len(program.items)}項目)")
+        except Exception as e:
+            print(f"[警告] 次第ファイルを読み込めませんでした: {e}")
 
     command_queue: "queue.Queue[str]" = queue.Queue()
     voice_controller = None
@@ -537,7 +729,7 @@ def main():
     api_thread = None
     if args.api_port:
         try:
-            api_server = make_now_playing_server(player, args.api_port)
+            api_server = make_now_playing_server(player, args.api_port, program)
             api_thread = threading.Thread(target=api_server.serve_forever, daemon=True)
             api_thread.start()
             print(f"[API] http://127.0.0.1:{args.api_port}/now-playing で再生情報を取得できます")
@@ -589,16 +781,31 @@ def main():
                 voice_command = command_queue.get_nowait()
                 status_text = apply_command(player, voice_command, prefix="VOICE")
 
+            if program:
+                program.tick()
+
             # 画面にステータス表示 (日本語ファイル名も文字化けしないようPILで描画)
-            cv2.rectangle(frame, (0, 0), (frame.shape[1], 70), (0, 0, 0), -1)
+            header_h = 100 if program else 70
+            cv2.rectangle(frame, (0, 0), (frame.shape[1], header_h), (0, 0, 0), -1)
             draw_text_ja(frame, f"Track: {player.current_name()}", (10, 8),
                          font_size=20, color=(255, 255, 255))
             draw_text_ja(frame, f"Status: {status_text}  Vol: {int(player.volume * 100)}%", (10, 38),
                          font_size=20, color=(0, 255, 0))
+            if program:
+                p_status = program.status()
+                if p_status["mode"] == "performing":
+                    program_line = f"上演中: {p_status['current_item']}"
+                else:
+                    program_line = f"転換中 -> {p_status['next_item']}"
+                draw_text_ja(frame, f"次第: {program_line}", (10, 68),
+                             font_size=20, color=(0, 255, 255))
 
-            cv2.imshow("BGM Hand Sign Player (q to quit)", frame)
-            if cv2.waitKey(1) & 0xFF == ord("q"):
+            cv2.imshow("BGM Hand Sign Player (q to quit, n: next item)", frame)
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q"):
                 break
+            elif key == ord("n") and program:
+                status_text = program.advance()
 
     cap.release()
     cv2.destroyAllWindows()

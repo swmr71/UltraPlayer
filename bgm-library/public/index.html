@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<title>BGMライブラリ管理</title>
+<style>
+  body { font-family: "Segoe UI", "Meiryo", sans-serif; background: #1b1d23; color: #e8e8e8; margin: 0; padding: 24px; }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  h2 { font-size: 16px; margin-top: 32px; border-bottom: 1px solid #444; padding-bottom: 4px; }
+  section { max-width: 960px; margin: 0 auto; }
+  .card { background: #262933; border-radius: 8px; padding: 16px; margin-top: 12px; }
+  label { display: block; font-size: 12px; color: #aaa; margin-top: 8px; }
+  input[type=text], input[type=file] { width: 100%; box-sizing: border-box; padding: 6px 8px; border-radius: 4px; border: 1px solid #444; background: #1b1d23; color: #eee; }
+  button { cursor: pointer; border: none; border-radius: 4px; padding: 6px 12px; background: #4f7cff; color: #fff; font-size: 13px; margin-top: 8px; }
+  button.secondary { background: #444; }
+  button.danger { background: #b3453f; }
+  table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 13px; }
+  th, td { border-bottom: 1px solid #383b45; padding: 6px 8px; text-align: left; vertical-align: top; }
+  th { color: #999; font-weight: normal; }
+  .badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 11px; background: #7a5c00; color: #ffd873; }
+  .row-inline { display: flex; gap: 8px; align-items: center; }
+  .spotify-results div { padding: 4px 6px; cursor: pointer; border-radius: 4px; }
+  .spotify-results div:hover { background: #333; }
+  .muted { color: #888; font-size: 12px; }
+  select { padding: 4px; border-radius: 4px; background: #1b1d23; color: #eee; border: 1px solid #444; }
+  .program-item { display: flex; gap: 8px; align-items: flex-start; margin-top: 10px; padding-top: 10px; border-top: 1px solid #333; }
+  .program-item input[type=text] { width: 220px; }
+  .program-item-main { flex: 1; }
+  .bgm-playlist { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+  .bgm-chip { display: flex; align-items: center; gap: 6px; background: #1b1d23; border: 1px solid #444; border-radius: 4px; padding: 3px 6px; font-size: 12px; }
+  .bgm-chip .bgm-chip-title { flex: 1; }
+  .bgm-chip button { margin: 0; padding: 1px 6px; font-size: 11px; }
+  .bgm-add-row { display: flex; gap: 6px; margin-top: 4px; align-items: center; }
+</style>
+</head>
+<body>
+<section>
+  <h1>BGMライブラリ管理</h1>
+  <p class="muted">アップロードした曲はUUIDファイル名で保存され、曲名・表示用曲名(伏字対応)・作者・注記を管理できます。</p>
+
+  <h2>曲を追加</h2>
+  <div class="card">
+    <label>音源ファイル (mp3 / wav / ogg)</label>
+    <input type="file" id="f-file" accept=".mp3,.wav,.ogg" />
+
+    <label>曲名 (内部管理用・フル表記)</label>
+    <input type="text" id="f-title" placeholder="例: YAJU&U" />
+
+    <div class="row-inline">
+      <button class="secondary" id="btn-artist-search" type="button">作者を検索 (last.fm)</button>
+      <span class="muted" id="artist-search-status"></span>
+    </div>
+    <div class="spotify-results" id="artist-search-results"></div>
+
+    <label>作者</label>
+    <input type="text" id="f-author" placeholder="例: MAOU" />
+
+    <label>表示用曲名 (画面表示時。伏字にしたい場合はここを編集。空欄なら曲名と同じ)</label>
+    <input type="text" id="f-display" placeholder="例: ■■■■&U" />
+
+    <label><input type="checkbox" id="f-arranged" style="width:auto;display:inline-block;vertical-align:middle;" /> 当方でBGM化(編集・二次利用)した音源</label>
+
+    <label>注記 (任意)</label>
+    <input type="text" id="f-note" placeholder="例: サビのみ抜粋・ピッチ変更あり" />
+
+    <button id="btn-upload" type="button">アップロード</button>
+    <span class="muted" id="upload-status"></span>
+  </div>
+
+  <h2>登録済みの曲</h2>
+  <div class="card">
+    <table>
+      <thead>
+        <tr><th>表示用曲名</th><th>曲名(内部)</th><th>作者</th><th>注記</th><th></th></tr>
+      </thead>
+      <tbody id="library-body"></tbody>
+    </table>
+  </div>
+
+  <h2>行事の次第 (発表項目とBGMの割り当て)</h2>
+  <div class="card">
+    <div id="program-list"></div>
+    <button class="secondary" id="btn-add-item" type="button">項目を追加</button>
+    <button id="btn-save-program" type="button">次第を保存</button>
+    <span class="muted" id="program-status"></span>
+  </div>
+</section>
+
+<script>
+let library = [];
+let program = [];
+
+async function refreshLibrary() {
+  library = await fetch("/api/tracks").then(r => r.json());
+  renderLibrary();
+  renderProgram();
+}
+
+async function refreshProgram() {
+  program = await fetch("/api/program").then(r => r.json());
+  renderProgram();
+}
+
+function renderLibrary() {
+  const body = document.getElementById("library-body");
+  body.innerHTML = "";
+  for (const t of library) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td><input type="text" value="${escapeAttr(t.displayTitle)}" data-field="displayTitle" data-id="${t.id}" /></td>
+      <td><input type="text" value="${escapeAttr(t.title)}" data-field="title" data-id="${t.id}" /></td>
+      <td><input type="text" value="${escapeAttr(t.author)}" data-field="author" data-id="${t.id}" /></td>
+      <td>${t.arranged ? '<span class="badge">BGM化</span> ' : ''}<input type="text" value="${escapeAttr(t.note)}" data-field="note" data-id="${t.id}" /></td>
+      <td><button class="danger" data-del="${t.id}">削除</button></td>
+    `;
+    body.appendChild(tr);
+  }
+  body.querySelectorAll("input[data-field]").forEach(inp => {
+    inp.addEventListener("change", async () => {
+      const id = inp.dataset.id, field = inp.dataset.field;
+      await fetch(`/api/tracks/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ [field]: inp.value }),
+      });
+      await refreshLibrary();
+    });
+  });
+  body.querySelectorAll("button[data-del]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      if (!confirm("この曲を削除しますか?")) return;
+      const r = await fetch(`/api/tracks/${btn.dataset.del}`, { method: "DELETE" }).then(r => r.json());
+      if (r.warning) alert(r.warning);
+      await refreshLibrary();
+    });
+  });
+}
+
+function renderProgram() {
+  const container = document.getElementById("program-list");
+  container.innerHTML = "";
+  const libraryById = Object.fromEntries(library.map(t => [t.id, t]));
+
+  program.forEach((item, i) => {
+    if (!Array.isArray(item.bgm)) item.bgm = item.bgm ? [item.bgm] : [];
+
+    const row = document.createElement("div");
+    row.className = "program-item";
+
+    const chips = item.bgm.map((id, ci) => {
+      const t = libraryById[id];
+      const label = t ? escapeHtml(t.displayTitle) : `(見つかりません: ${escapeHtml(id)})`;
+      return `
+        <div class="bgm-chip">
+          <span class="muted">${ci + 1}.</span>
+          <span class="bgm-chip-title">${label}</span>
+          <button class="secondary" data-chip-up="${i}:${ci}" type="button">↑</button>
+          <button class="secondary" data-chip-down="${i}:${ci}" type="button">↓</button>
+          <button class="danger" data-chip-remove="${i}:${ci}" type="button">×</button>
+        </div>`;
+    }).join("");
+
+    const availableOptions = library.map(t =>
+      `<option value="${t.id}">${escapeHtml(t.displayTitle)}</option>`
+    ).join("");
+
+    row.innerHTML = `
+      <span class="muted">#${i + 1}</span>
+      <div class="program-item-main">
+        <input type="text" value="${escapeAttr(item.name || "")}" data-idx="${i}" data-field="name" placeholder="項目名 (例: 劇『桃太郎』)" />
+        <div class="bgm-playlist">
+          ${chips || '<span class="muted">(BGMなし・上演中扱い)</span>'}
+        </div>
+        <div class="bgm-add-row">
+          <select data-add-bgm="${i}">
+            <option value="">+ BGMをプレイリストに追加...</option>
+            ${availableOptions}
+          </select>
+        </div>
+      </div>
+      <button class="secondary" data-up="${i}" type="button">↑</button>
+      <button class="secondary" data-down="${i}" type="button">↓</button>
+      <button class="danger" data-remove="${i}" type="button">項目削除</button>
+    `;
+    container.appendChild(row);
+  });
+
+  container.querySelectorAll("input[data-field]").forEach(el => {
+    el.addEventListener("input", () => {
+      const idx = Number(el.dataset.idx), field = el.dataset.field;
+      program[idx][field] = el.value;
+    });
+  });
+  container.querySelectorAll("select[data-add-bgm]").forEach(el => {
+    el.addEventListener("change", () => {
+      if (!el.value) return;
+      const idx = Number(el.dataset.addBgm);
+      program[idx].bgm.push(el.value);
+      renderProgram();
+    });
+  });
+  container.querySelectorAll("button[data-chip-remove]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const [i, ci] = btn.dataset.chipRemove.split(":").map(Number);
+      program[i].bgm.splice(ci, 1);
+      renderProgram();
+    });
+  });
+  container.querySelectorAll("button[data-chip-up]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const [i, ci] = btn.dataset.chipUp.split(":").map(Number);
+      if (ci > 0) { const l = program[i].bgm; [l[ci - 1], l[ci]] = [l[ci], l[ci - 1]]; renderProgram(); }
+    });
+  });
+  container.querySelectorAll("button[data-chip-down]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const [i, ci] = btn.dataset.chipDown.split(":").map(Number);
+      const l = program[i].bgm;
+      if (ci < l.length - 1) { [l[ci + 1], l[ci]] = [l[ci], l[ci + 1]]; renderProgram(); }
+    });
+  });
+  container.querySelectorAll("button[data-remove]").forEach(btn => {
+    btn.addEventListener("click", () => { program.splice(Number(btn.dataset.remove), 1); renderProgram(); });
+  });
+  container.querySelectorAll("button[data-up]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const i = Number(btn.dataset.up);
+      if (i > 0) { [program[i - 1], program[i]] = [program[i], program[i - 1]]; renderProgram(); }
+    });
+  });
+  container.querySelectorAll("button[data-down]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const i = Number(btn.dataset.down);
+      if (i < program.length - 1) { [program[i + 1], program[i]] = [program[i], program[i + 1]]; renderProgram(); }
+    });
+  });
+}
+
+document.getElementById("btn-add-item").addEventListener("click", () => {
+  program.push({ name: "", bgm: [] });
+  renderProgram();
+});
+
+document.getElementById("btn-save-program").addEventListener("click", async () => {
+  const status = document.getElementById("program-status");
+  const cleaned = program.filter(item => item.name && item.name.trim());
+  const res = await fetch("/api/program", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(cleaned),
+  });
+  status.textContent = res.ok ? "保存しました" : "保存に失敗しました";
+  await refreshProgram();
+});
+
+document.getElementById("btn-artist-search").addEventListener("click", async () => {
+  const title = document.getElementById("f-title").value.trim();
+  const statusEl = document.getElementById("artist-search-status");
+  const resultsEl = document.getElementById("artist-search-results");
+  resultsEl.innerHTML = "";
+  if (!title) { statusEl.textContent = "先に曲名を入力してください"; return; }
+  statusEl.textContent = "検索中...";
+  const data = await fetch(`/api/artist-search?q=${encodeURIComponent(title)}`).then(r => r.json());
+  if (!data.enabled) { statusEl.textContent = "作者検索は未設定です (.env参照)"; return; }
+  statusEl.textContent = data.results.length ? `${data.results.length}件見つかりました (クリックで反映)` : "見つかりませんでした (フリーBGM素材は商用配信されていないため未収録のことが多いです)";
+  data.results.forEach(r => {
+    const div = document.createElement("div");
+    div.textContent = `${r.title} - ${r.artist}`;
+    div.addEventListener("click", () => { document.getElementById("f-author").value = r.artist; });
+    resultsEl.appendChild(div);
+  });
+});
+
+document.getElementById("btn-upload").addEventListener("click", async () => {
+  const status = document.getElementById("upload-status");
+  const fileInput = document.getElementById("f-file");
+  if (!fileInput.files[0]) { status.textContent = "ファイルを選択してください"; return; }
+
+  const fd = new FormData();
+  fd.append("file", fileInput.files[0]);
+  fd.append("title", document.getElementById("f-title").value.trim());
+  fd.append("author", document.getElementById("f-author").value.trim());
+  fd.append("displayTitle", document.getElementById("f-display").value.trim());
+  fd.append("arranged", document.getElementById("f-arranged").checked);
+  fd.append("note", document.getElementById("f-note").value.trim());
+
+  status.textContent = "アップロード中...";
+  const res = await fetch("/api/tracks", { method: "POST", body: fd });
+  const data = await res.json();
+  if (!res.ok) { status.textContent = `失敗: ${data.error}`; return; }
+
+  status.textContent = "追加しました";
+  ["f-title", "f-author", "f-display", "f-note"].forEach(id => document.getElementById(id).value = "");
+  document.getElementById("f-arranged").checked = false;
+  fileInput.value = "";
+  document.getElementById("artist-search-results").innerHTML = "";
+  document.getElementById("artist-search-status").textContent = "";
+  await refreshLibrary();
+});
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function escapeAttr(s) { return escapeHtml(s); }
+
+refreshLibrary();
+</script>
+</body>
+</html>
