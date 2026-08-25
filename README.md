@@ -2,6 +2,9 @@
 
 Webカメラでハンドサインを認識してBGMを操作するPythonアプリ。
 
+よく使うページへのリンクは [links.html](links.html) にまとめてあります
+(`http://127.0.0.1:8000/links.html` などで開いてください)。
+
 ## セットアップ
 
 ```bash
@@ -19,13 +22,20 @@ Windowsでmp3再生時に問題が出る場合は、SDL2周りの依存が必要
    `tracks/tracks.json` に曲名・表示用曲名(伏字対応)・作者などのメタデータ付きで
    自動的に登録されます(こちらが優先して読み込まれます)。
 
-2. 実行:
+2. ハンドサイン認識(カメラ)はデフォルトではオフです。`control.html` / 音声 / API
+   だけで操作する場合はそのまま実行:
 
 ```bash
 python main.py --dir ./tracks
 ```
 
-3. カメラに向かって手を映すと、以下のジェスチャーで操作できます。
+   カメラでハンドサイン操作もしたい場合は `--hand-sign` を付けて実行:
+
+```bash
+python main.py --dir ./tracks --hand-sign
+```
+
+3. `--hand-sign` 指定時、カメラに向かって手を映すと以下のジェスチャーで操作できます。
 
 | ジェスチャー | 動作 |
 |---|---|
@@ -73,10 +83,11 @@ python main.py --dir ./tracks --voice
 ## オプション
 
 ```bash
-python main.py --dir ./tracks --camera 0 --cooldown 1.0 --voice --api-port 8787 --program program.json
+python main.py --dir ./tracks --hand-sign --camera 0 --cooldown 1.0 --voice --api-port 8787 --program program.json
 ```
 
-- `--camera`: 複数カメラがある場合のデバイス番号 (デフォルト 0)
+- `--hand-sign`: カメラでハンドサイン認識を有効化 (デフォルトはオフ)
+- `--camera`: 複数カメラがある場合のデバイス番号 (デフォルト 0、`--hand-sign` 指定時のみ使用)
 - `--cooldown`: 同じジェスチャーを連続で誤爆させないための待ち時間(秒)
 - `--voice`: 音声コマンドを有効化
 - `--api-port`: 現在再生中の曲情報とキャリブレーション状態を提供するHTTP APIのポート (デフォルト 8787、0で無効化)
@@ -183,6 +194,11 @@ npm start
   `.env` の `LASTFM_API_KEY` に設定すると、曲名から作者候補を検索できます
   (魔王魂などのフリーBGM素材は商用配信されていないため基本的にヒットしません。
   市販曲を使う場合の検索補助として使えます)。
+- YouTubeからダウンロード: URLを入力して「情報取得」でタイトル・投稿者を自動入力し、
+  「ダウンロードしてライブラリに追加」で音声を抽出してそのまま登録できます。
+  [yt-dlp](https://github.com/yt-dlp/yt-dlp) と [ffmpeg](https://ffmpeg.org/) が
+  別途必要です(`pip install yt-dlp` + ffmpegをPATHに通す)。ダウンロードした音源の
+  著作権・利用規約の確認は利用者側の責任で行ってください。
 - 行事の次第: 発表項目を追加し、各項目にライブラリの曲をプレイリストとして
   複数割り当てられます(`../program.json` に保存され、`main.py --program` が
   読み込みます)。

@@ -38,7 +38,35 @@
   <h1>BGMライブラリ管理</h1>
   <p class="muted">アップロードした曲はUUIDファイル名で保存され、曲名・表示用曲名(伏字対応)・作者・注記を管理できます。</p>
 
-  <h2>曲を追加</h2>
+  <h2>YouTubeからダウンロード</h2>
+  <div class="card">
+    <label>YouTube URL</label>
+    <div class="row-inline">
+      <input type="text" id="yt-url" placeholder="https://www.youtube.com/watch?v=..." style="flex:1;" />
+      <button class="secondary" id="btn-yt-info" type="button">情報取得</button>
+    </div>
+    <span class="muted" id="yt-info-status"></span>
+
+    <label>曲名</label>
+    <input type="text" id="yt-title" placeholder="情報取得すると自動入力されます(編集可)" />
+
+    <label>作者</label>
+    <input type="text" id="yt-author" placeholder="投稿者名が自動入力されます(編集可)" />
+
+    <label>表示用曲名 (空欄なら曲名と同じ)</label>
+    <input type="text" id="yt-display" placeholder="例: ■■■■&U" />
+
+    <label><input type="checkbox" id="yt-arranged" style="width:auto;display:inline-block;vertical-align:middle;" /> 当方でBGM化(編集・二次利用)した音源</label>
+
+    <label>注記 (任意)</label>
+    <input type="text" id="yt-note" placeholder="例: サビのみ抜粋" />
+
+    <button id="btn-yt-download" type="button">ダウンロードしてライブラリに追加</button>
+    <span class="muted" id="yt-download-status"></span>
+    <p class="muted" style="margin-top:8px;">著作権・利用規約の確認は利用者側の責任で行ってください。</p>
+  </div>
+
+  <h2>ファイルをアップロード</h2>
   <div class="card">
     <label>音源ファイル (mp3 / wav / ogg)</label>
     <input type="file" id="f-file" accept=".mp3,.wav,.ogg" />
@@ -269,6 +297,57 @@ document.getElementById("btn-artist-search").addEventListener("click", async () 
     div.addEventListener("click", () => { document.getElementById("f-author").value = r.artist; });
     resultsEl.appendChild(div);
   });
+});
+
+document.getElementById("btn-yt-info").addEventListener("click", async () => {
+  const url = document.getElementById("yt-url").value.trim();
+  const statusEl = document.getElementById("yt-info-status");
+  if (!url) { statusEl.textContent = "URLを入力してください"; return; }
+  statusEl.textContent = "情報取得中...";
+  try {
+    const res = await fetch(`/api/youtube-info?url=${encodeURIComponent(url)}`);
+    const data = await res.json();
+    if (!res.ok) { statusEl.textContent = data.error || "取得に失敗しました"; return; }
+    document.getElementById("yt-title").value = data.title || "";
+    document.getElementById("yt-author").value = data.author || "";
+    statusEl.textContent = "取得しました (曲名・作者は必要に応じて編集してください)";
+  } catch (e) {
+    statusEl.textContent = "取得に失敗しました";
+  }
+});
+
+document.getElementById("btn-yt-download").addEventListener("click", async () => {
+  const status = document.getElementById("yt-download-status");
+  const url = document.getElementById("yt-url").value.trim();
+  const title = document.getElementById("yt-title").value.trim();
+  if (!url) { status.textContent = "URLを入力してください"; return; }
+  if (!title) { status.textContent = "曲名を入力してください"; return; }
+
+  status.textContent = "ダウンロード中... (数十秒かかる場合があります)";
+  try {
+    const res = await fetch("/api/tracks/from-youtube", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        url,
+        title,
+        author: document.getElementById("yt-author").value.trim(),
+        displayTitle: document.getElementById("yt-display").value.trim(),
+        arranged: document.getElementById("yt-arranged").checked,
+        note: document.getElementById("yt-note").value.trim(),
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) { status.textContent = `失敗: ${data.error}`; return; }
+
+    status.textContent = "追加しました";
+    ["yt-url", "yt-title", "yt-author", "yt-display", "yt-note"].forEach(id => document.getElementById(id).value = "");
+    document.getElementById("yt-arranged").checked = false;
+    document.getElementById("yt-info-status").textContent = "";
+    await refreshLibrary();
+  } catch (e) {
+    status.textContent = "ダウンロードに失敗しました";
+  }
 });
 
 document.getElementById("btn-upload").addEventListener("click", async () => {

@@ -32,6 +32,8 @@ function pxPerCm(monitorState) {
   return DEFAULT_PX_PER_CM;
 }
 
+let lastData = null;
+
 async function pollCalib() {
   try {
     const res = await fetch(CALIB_URL, { cache: "no-store" });
@@ -39,7 +41,7 @@ async function pollCalib() {
     const data = await res.json();
     if (data["1"]) { state[1].heightCm = data["1"].heightCm; state[1].yOffsetPx = data["1"].yOffsetPx || 0; }
     if (data["2"]) { state[2].heightCm = data["2"].heightCm; state[2].yOffsetPx = data["2"].yOffsetPx || 0; }
-    layoutStage();
+    render(lastData);
   } catch (e) {
     // キャリブレーションサーバーに繋がらない場合はデフォルト値のまま表示を続ける
   }
@@ -86,6 +88,64 @@ function fitTrackName(totalWidthPx) {
   }
 }
 
+// main.py --program 利用時は {mode, current_item/next_item, bgm} 形式、
+// 未使用時は {track: {title, author, arranged}, playing, ...} 形式で返る。
+function extractNowPlaying(data) {
+  if (data.mode === "performing") {
+    return { title: data.current_item, statusText: "上演中", playing: false };
+  }
+  return {
+    title: (data.track && typeof data.track === "object") ? data.track.title : data.track,
+    statusText: data.playing ? "NOW PLAYING" : "PAUSED",
+    playing: Boolean(data.playing),
+  };
+}
+
+// 転換中は2画面を1枚として繋げず、モニターごとに独立した内容を表示する。
+// 1枚目(左): 大きく「転換中 Next: 次の項目名」
+// 2枚目(右): 小さく「再生中: 曲名/作者」
+function layoutTransition(data) {
+  state[MONITOR].innerHeightPx = window.innerHeight;
+  state[MONITOR].innerWidthPx = window.innerWidth;
+
+  stageEl.style.width = window.innerWidth + "px";
+  stageEl.style.height = window.innerHeight + "px";
+  stageEl.style.left = "0px";
+  stageEl.style.top = (state[MONITOR].yOffsetPx || 0) + "px";
+
+  const myPxPerCm = pxPerCm(state[MONITOR]);
+  const heightCm = state[MONITOR].heightCm
+    ? window.innerHeight / myPxPerCm
+    : (window.innerHeight / DEFAULT_PX_PER_CM);
+
+  if (MONITOR === 1) {
+    trackName.textContent = `Next: ${data.next_item}`;
+    trackName.style.fontSize = (heightCm * 0.28 * myPxPerCm) + "px";
+  } else {
+    const author = data.bgm.author ? `/${data.bgm.author}` : "";
+    trackName.textContent = `再生中：${data.bgm.title}${author}`;
+    trackName.style.fontSize = (heightCm * 0.08 * myPxPerCm) + "px";
+  }
+  statusBadge.textContent = "転換中";
+  statusBadge.style.fontSize = (heightCm * 0.03 * myPxPerCm) + "px";
+
+  appEl.classList.remove("paused");
+  fitTrackName(window.innerWidth);
+}
+
+function render(data) {
+  if (!data) return;
+  if (data.mode === "transition") {
+    layoutTransition(data);
+    return;
+  }
+  const info = extractNowPlaying(data);
+  trackName.textContent = info.title;
+  statusBadge.textContent = info.statusText;
+  appEl.classList.toggle("paused", !info.playing);
+  layoutStage();
+}
+
 // --- 再生中の曲情報ポーリング ---
 async function pollNowPlaying() {
   try {
@@ -93,18 +153,14 @@ async function pollNowPlaying() {
     if (!res.ok) throw new Error("bad status");
     const data = await res.json();
     connError.classList.remove("show");
-
-    trackName.textContent = data.track.replace(/\.(mp3|wav|ogg)$/i, "");
-    statusBadge.textContent = data.playing ? "NOW PLAYING" : "PAUSED";
-    appEl.classList.toggle("paused", !data.playing);
-
-    layoutStage();
+    lastData = data;
+    render(data);
   } catch (e) {
     connError.classList.add("show");
   }
 }
 
-window.addEventListener("resize", layoutStage);
+window.addEventListener("resize", () => { if (lastData) render(lastData); else layoutStage(); });
 
 layoutStage();
 pollNowPlaying();

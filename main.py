@@ -411,6 +411,10 @@ class BGMPlayer:
             "volume": round(self.volume, 2),
             "index": self.index,
             "total_tracks": len(self.library),
+            "tracks": [
+                {"id": t["id"], "title": t["displayTitle"], "author": t["author"], "arranged": t["arranged"]}
+                for t in self.library
+            ],
         }
 
     def toggle_play_pause(self):
@@ -551,6 +555,14 @@ class ProgramController:
             "current_item": self.items[self.current_idx]["name"],
         }
 
+    def admin_status(self) -> dict:
+        """管理画面(control.html)向けの詳細ステータス。進行位置と項目一覧を含む。"""
+        info = self.status()
+        info["current_idx"] = self.current_idx
+        info["total_items"] = len(self.items)
+        info["items"] = [item["name"] for item in self.items]
+        return info
+
 
 # ------------------------------------------------------------
 # monitor1.html / monitor2.html の物理サイズキャリブレーション状態
@@ -606,15 +618,27 @@ class CalibStore:
 # ------------------------------------------------------------
 # 現在再生中の曲情報 & キャリブレーション状態を外部から取得/更新するための簡易HTTP API
 # ------------------------------------------------------------
-def make_now_playing_server(player: "BGMPlayer", port: int, program: "ProgramController" = None) -> ThreadingHTTPServer:
+def make_now_playing_server(
+    player: "BGMPlayer",
+    port: int,
+    program: "ProgramController" = None,
+    command_queue: "queue.Queue[str]" = None,
+) -> ThreadingHTTPServer:
     """GET /now-playing で現在状態、GET/POST /calib でキャリブレーション状態を扱うHTTPサーバーを作る
 
     program が指定されている場合、/now-playing は行事次第の進行状況
     (上演中なら項目名のみ、転換中なら次の項目名+再生中BGM) を返す。
     未指定の場合は従来通り player.status() を返す。
+
+    command_queue を指定すると、control.html などの管理画面からの操作を
+    受け付けられるようになる (POST /command, POST /program/advance)。
+    実際の再生操作はメインループ側のスレッドでまとめて処理するため、
+    ここではキューに積むだけにして pygame の呼び出しをスレッド間で
+    競合させないようにしている。
     """
 
     calib_store = CalibStore()
+    VALID_COMMANDS = {"PLAY_PAUSE", "STOP", "NEXT", "PREV", "VOL_UP", "VOL_DOWN"}
 
     class Handler(BaseHTTPRequestHandler):
         def _send_json(self, obj, status=200):
@@ -636,6 +660,11 @@ def make_now_playing_server(player: "BGMPlayer", port: int, program: "ProgramCon
         def do_GET(self):
             if self.path in ("/", "/now-playing"):
                 self._send_json(program.status() if program else player.status())
+            elif self.path == "/admin/status":
+                self._send_json({
+                    "player": player.status(),
+                    "program": program.admin_status() if program else None,
+                })
             elif self.path == "/calib":
                 self._send_json(calib_store.get())
             else:
@@ -643,22 +672,44 @@ def make_now_playing_server(player: "BGMPlayer", port: int, program: "ProgramCon
                 self.end_headers()
 
         def do_POST(self):
-            if self.path != "/calib":
+            if self.path == "/calib":
+                try:
+                    length = int(self.headers.get("Content-Length", 0))
+                    raw = self.rfile.read(length) if length else b"{}"
+                    payload = json.loads(raw.decode("utf-8"))
+                    monitor = str(payload.get("monitor"))
+                    updated = calib_store.update(monitor, payload)
+                    if updated is None:
+                        self._send_json({"error": "invalid monitor"}, status=400)
+                    else:
+                        self._send_json(updated)
+                except Exception as e:
+                    self._send_json({"error": str(e)}, status=400)
+            elif self.path == "/command":
+                if command_queue is None:
+                    self._send_json({"error": "command queue unavailable"}, status=503)
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", 0))
+                    raw = self.rfile.read(length) if length else b"{}"
+                    payload = json.loads(raw.decode("utf-8"))
+                    command = payload.get("command")
+                    if command not in VALID_COMMANDS:
+                        self._send_json({"error": "invalid command"}, status=400)
+                    else:
+                        command_queue.put(command)
+                        self._send_json({"queued": command}, status=202)
+                except Exception as e:
+                    self._send_json({"error": str(e)}, status=400)
+            elif self.path == "/program/advance":
+                if program is None or command_queue is None:
+                    self._send_json({"error": "program not enabled (--program を指定してください)"}, status=400)
+                else:
+                    command_queue.put("PROGRAM_NEXT")
+                    self._send_json({"queued": "PROGRAM_NEXT"}, status=202)
+            else:
                 self.send_response(404)
                 self.end_headers()
-                return
-            try:
-                length = int(self.headers.get("Content-Length", 0))
-                raw = self.rfile.read(length) if length else b"{}"
-                payload = json.loads(raw.decode("utf-8"))
-                monitor = str(payload.get("monitor"))
-                updated = calib_store.update(monitor, payload)
-                if updated is None:
-                    self._send_json({"error": "invalid monitor"}, status=400)
-                else:
-                    self._send_json(updated)
-            except Exception as e:
-                self._send_json({"error": str(e)}, status=400)
 
         def log_message(self, format, *args):
             pass  # コンソールを汚さないようアクセスログは出さない
@@ -696,7 +747,8 @@ def apply_command(player: "BGMPlayer", command: str, prefix: str = "") -> str:
 def main():
     parser = argparse.ArgumentParser(description="ハンドサインで操作するBGMプレイヤー")
     parser.add_argument("--dir", type=str, default="./tracks", help="音源フォルダ (mp3/wav/ogg)")
-    parser.add_argument("--camera", type=int, default=0, help="カメラデバイス番号")
+    parser.add_argument("--hand-sign", action="store_true", help="カメラでハンドサイン認識を有効化する (デフォルトはオフ。control.html/音声/APIのみで操作する場合は指定不要)")
+    parser.add_argument("--camera", type=int, default=0, help="カメラデバイス番号 (--hand-sign 指定時のみ使用)")
     parser.add_argument("--cooldown", type=float, default=1.0, help="同一ジェスチャーの連続発火防止秒数")
     parser.add_argument("--voice", action="store_true", help="音声コマンドも有効化する (要 vosk, pyaudio)")
     parser.add_argument("--api-port", type=int, default=8787, help="現在再生中の曲情報を返すHTTP APIのポート (0で無効化)")
@@ -729,86 +781,106 @@ def main():
     api_thread = None
     if args.api_port:
         try:
-            api_server = make_now_playing_server(player, args.api_port, program)
+            api_server = make_now_playing_server(player, args.api_port, program, command_queue)
             api_thread = threading.Thread(target=api_server.serve_forever, daemon=True)
             api_thread.start()
             print(f"[API] http://127.0.0.1:{args.api_port}/now-playing で再生情報を取得できます")
         except OSError as e:
             print(f"[警告] APIサーバーを起動できませんでした: {e}")
 
-    mp_hands = mp.solutions.hands
-    mp_drawing = mp.solutions.drawing_utils
-
-    cap = cv2.VideoCapture(args.camera)
-    if not cap.isOpened():
-        print("[エラー] カメラを開けませんでした。--camera の番号を確認してください。")
-        sys.exit(1)
-
     status_text = "READY"
 
-    with mp_hands.Hands(
-        model_complexity=0,
-        min_detection_confidence=0.6,
-        min_tracking_confidence=0.6,
-        max_num_hands=1,
-    ) as hands:
-        while True:
-            ok, frame = cap.read()
-            if not ok:
-                break
-
-            frame = cv2.flip(frame, 1)
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            result = hands.process(rgb)
-
-            if result.multi_hand_landmarks and result.multi_handedness:
-                hand_landmarks = result.multi_hand_landmarks[0]
-                handedness_label = result.multi_handedness[0].classification[0].label
-
-                mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
-
-                gesture = recognizer.recognize(hand_landmarks.landmark, handedness_label)
-                stable_gesture = recognizer.stabilize(gesture)
-
-                if recognizer.fire(stable_gesture):
-                    status_text = apply_command(player, stable_gesture, prefix="HAND")
+    def drain_command_queue():
+        nonlocal status_text
+        while not command_queue.empty():
+            queued_command = command_queue.get_nowait()
+            if queued_command == "PROGRAM_NEXT":
+                if program:
+                    status_text = program.advance()
             else:
-                recognizer.stabilize(None)
-                recognizer.fire(None)
+                status_text = apply_command(player, queued_command, prefix="CMD")
 
-            # 音声コマンドキューを消化 (ノンブロッキング)
-            while not command_queue.empty():
-                voice_command = command_queue.get_nowait()
-                status_text = apply_command(player, voice_command, prefix="VOICE")
+    if args.hand_sign:
+        mp_hands = mp.solutions.hands
+        mp_drawing = mp.solutions.drawing_utils
 
-            if program:
-                program.tick()
+        cap = cv2.VideoCapture(args.camera)
+        if not cap.isOpened():
+            print("[エラー] カメラを開けませんでした。--camera の番号を確認してください。")
+            sys.exit(1)
 
-            # 画面にステータス表示 (日本語ファイル名も文字化けしないようPILで描画)
-            header_h = 100 if program else 70
-            cv2.rectangle(frame, (0, 0), (frame.shape[1], header_h), (0, 0, 0), -1)
-            draw_text_ja(frame, f"Track: {player.current_name()}", (10, 8),
-                         font_size=20, color=(255, 255, 255))
-            draw_text_ja(frame, f"Status: {status_text}  Vol: {int(player.volume * 100)}%", (10, 38),
-                         font_size=20, color=(0, 255, 0))
-            if program:
-                p_status = program.status()
-                if p_status["mode"] == "performing":
-                    program_line = f"上演中: {p_status['current_item']}"
+        with mp_hands.Hands(
+            model_complexity=0,
+            min_detection_confidence=0.6,
+            min_tracking_confidence=0.6,
+            max_num_hands=1,
+        ) as hands:
+            while True:
+                ok, frame = cap.read()
+                if not ok:
+                    break
+
+                frame = cv2.flip(frame, 1)
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                result = hands.process(rgb)
+
+                if result.multi_hand_landmarks and result.multi_handedness:
+                    hand_landmarks = result.multi_hand_landmarks[0]
+                    handedness_label = result.multi_handedness[0].classification[0].label
+
+                    mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+
+                    gesture = recognizer.recognize(hand_landmarks.landmark, handedness_label)
+                    stable_gesture = recognizer.stabilize(gesture)
+
+                    if recognizer.fire(stable_gesture):
+                        status_text = apply_command(player, stable_gesture, prefix="HAND")
                 else:
-                    program_line = f"転換中 -> {p_status['next_item']}"
-                draw_text_ja(frame, f"次第: {program_line}", (10, 68),
-                             font_size=20, color=(0, 255, 255))
+                    recognizer.stabilize(None)
+                    recognizer.fire(None)
 
-            cv2.imshow("BGM Hand Sign Player (q to quit, n: next item)", frame)
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord("q"):
-                break
-            elif key == ord("n") and program:
-                status_text = program.advance()
+                drain_command_queue()
 
-    cap.release()
-    cv2.destroyAllWindows()
+                if program:
+                    program.tick()
+
+                # 画面にステータス表示 (日本語ファイル名も文字化けしないようPILで描画)
+                header_h = 100 if program else 70
+                cv2.rectangle(frame, (0, 0), (frame.shape[1], header_h), (0, 0, 0), -1)
+                draw_text_ja(frame, f"Track: {player.current_name()}", (10, 8),
+                             font_size=20, color=(255, 255, 255))
+                draw_text_ja(frame, f"Status: {status_text}  Vol: {int(player.volume * 100)}%", (10, 38),
+                             font_size=20, color=(0, 255, 0))
+                if program:
+                    p_status = program.status()
+                    if p_status["mode"] == "performing":
+                        program_line = f"上演中: {p_status['current_item']}"
+                    else:
+                        program_line = f"転換中 -> {p_status['next_item']}"
+                    draw_text_ja(frame, f"次第: {program_line}", (10, 68),
+                                 font_size=20, color=(0, 255, 255))
+
+                cv2.imshow("BGM Hand Sign Player (q to quit, n: next item)", frame)
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord("q"):
+                    break
+                elif key == ord("n") and program:
+                    status_text = program.advance()
+
+        cap.release()
+        cv2.destroyAllWindows()
+    else:
+        print("[INFO] ハンドサイン認識はオフです (カメラ未使用)。control.html / 音声 / API で操作してください。")
+        print("[INFO] Ctrl+C で終了します。")
+        try:
+            while True:
+                drain_command_queue()
+                if program:
+                    program.tick()
+                time.sleep(0.05)
+        except KeyboardInterrupt:
+            pass
+
     pygame.mixer.quit()
     if voice_controller:
         voice_controller.stop()

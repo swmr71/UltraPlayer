@@ -76,6 +76,44 @@
     width: 50%; transition: width 0.4s ease;
   }
 
+  #controls { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
+  #controls button {
+    padding: 10px 16px;
+    border-radius: 8px;
+    border: 1px solid rgba(125,225,255,0.3);
+    background: rgba(125,225,255,0.1);
+    color: #7de1ff;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  #controls button:hover { background: rgba(125,225,255,0.2); }
+  #controls button:active { transform: scale(0.96); }
+  #controls button.wide { flex: 1 1 100%; }
+
+  #program-card {
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 12px;
+    padding: 16px;
+    margin-bottom: 20px;
+    font-size: 13px;
+  }
+  #program-card .mode { color: #7de1ff; font-weight: 700; letter-spacing: 0.1em; font-size: 12px; margin-bottom: 6px; }
+  #program-card .item-name { font-size: 18px; font-weight: 700; margin-bottom: 4px; }
+  #program-card .sub { color: #999; }
+  #program-card button {
+    margin-top: 12px;
+    width: 100%;
+    padding: 10px;
+    border-radius: 8px;
+    border: 1px solid rgba(184,139,255,0.4);
+    background: rgba(184,139,255,0.15);
+    color: #d8bfff;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  #program-card button:hover { background: rgba(184,139,255,0.28); }
+
   #playlist { display: flex; flex-direction: column; gap: 6px; }
   .track-row {
     display: flex; align-items: center; gap: 10px;
@@ -189,6 +227,23 @@
     </div>
   </div>
   <div class="col">
+    <h2>コントロール</h2>
+    <div id="controls">
+      <button id="btn-playpause">▶/⏸ 再生/一時停止</button>
+      <button id="btn-stop">■ 停止</button>
+      <button id="btn-prev">⏮ 前の曲</button>
+      <button id="btn-next">⏭ 次の曲</button>
+      <button id="btn-voldown">🔉 音量-</button>
+      <button id="btn-volup">🔊 音量+</button>
+    </div>
+
+    <div id="program-card" style="display:none;">
+      <div class="mode" id="program-mode">-</div>
+      <div class="item-name" id="program-item">-</div>
+      <div class="sub" id="program-sub"></div>
+      <button id="btn-program-advance">次の項目へ (N)</button>
+    </div>
+
     <h2>PLAYLIST</h2>
     <div id="playlist"></div>
   </div>
@@ -239,7 +294,9 @@
 </div>
 
 <script>
-const API_URL = "http://127.0.0.1:8787/now-playing";
+const ADMIN_STATUS_URL = "http://127.0.0.1:8787/admin/status";
+const COMMAND_URL = "http://127.0.0.1:8787/command";
+const PROGRAM_ADVANCE_URL = "http://127.0.0.1:8787/program/advance";
 const CALIB_URL = "http://127.0.0.1:8787/calib";
 const POLL_MS = 700;
 
@@ -251,43 +308,105 @@ const volumeValue = document.getElementById("volume-value");
 const playlistEl = document.getElementById("playlist");
 const connDot = document.getElementById("conn-dot");
 const connText = document.getElementById("conn-text");
+const programCard = document.getElementById("program-card");
+const programMode = document.getElementById("program-mode");
+const programItem = document.getElementById("program-item");
+const programSub = document.getElementById("program-sub");
 
-function renderPlaylist(data) {
-  const names = data.tracks || [];
+function renderPlaylist(player) {
+  const tracks = player.tracks || [];
   playlistEl.innerHTML = "";
-  const total = data.total_tracks || names.length;
+  const total = player.total_tracks || tracks.length;
   for (let i = 0; i < total; i++) {
     const row = document.createElement("div");
-    row.className = "track-row" + (i === data.index ? " active" : "");
-    const name = names[i] || `Track ${i + 1}`;
+    row.className = "track-row" + (i === player.index ? " active" : "");
+    const t = tracks[i];
+    const name = t ? t.title + (t.arranged ? " [BGM化]" : "") : `Track ${i + 1}`;
     row.innerHTML = `<span class="track-num">${String(i + 1).padStart(2, "0")}</span><span>${name}</span>`;
     playlistEl.appendChild(row);
   }
 }
 
+function renderProgram(program) {
+  if (!program) {
+    programCard.style.display = "none";
+    return;
+  }
+  programCard.style.display = "";
+  if (program.mode === "transition") {
+    programMode.textContent = "転換中";
+    programItem.textContent = `Next: ${program.next_item}`;
+    const author = program.bgm.author ? ` / ${program.bgm.author}` : "";
+    programSub.textContent = `再生中BGM: ${program.bgm.title}${author}`;
+  } else {
+    programMode.textContent = "上演中";
+    programItem.textContent = program.current_item;
+    programSub.textContent = `${program.current_idx + 1} / ${program.total_items} 項目`;
+  }
+}
+
 async function poll() {
   try {
-    const res = await fetch(API_URL, { cache: "no-store" });
+    const res = await fetch(ADMIN_STATUS_URL, { cache: "no-store" });
     if (!res.ok) throw new Error("bad status");
     const data = await res.json();
+    const player = data.player;
 
     connDot.classList.add("ok");
     connText.textContent = "接続中";
 
-    trackName.textContent = data.track;
-    statusBadge.textContent = data.playing ? "NOW PLAYING" : "PAUSED";
-    indexLine.textContent = `Track ${data.index + 1} / ${data.total_tracks}`;
+    const trackTitle = (player.track && typeof player.track === "object") ? player.track.title : player.track;
+    trackName.textContent = trackTitle;
+    statusBadge.textContent = player.playing ? "NOW PLAYING" : "PAUSED";
 
-    const volPct = Math.round(data.volume * 100);
-    volumeFill.style.width = volPct + "%";
-    volumeValue.textContent = volPct + "%";
+    if (typeof player.index === "number" && typeof player.total_tracks === "number") {
+      indexLine.textContent = `Track ${player.index + 1} / ${player.total_tracks}`;
+    } else {
+      indexLine.textContent = "";
+    }
 
-    renderPlaylist(data);
+    if (typeof player.volume === "number") {
+      const volPct = Math.round(player.volume * 100);
+      volumeFill.style.width = volPct + "%";
+      volumeValue.textContent = volPct + "%";
+    }
+
+    renderPlaylist(player);
+    renderProgram(data.program);
   } catch (e) {
     connDot.classList.remove("ok");
     connText.textContent = "未接続 (main.py が起動しているか確認してください)";
   }
 }
+
+async function sendCommand(command) {
+  try {
+    await fetch(COMMAND_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ command }),
+    });
+    poll();
+  } catch (e) {
+    // 未接続時は poll() 側のエラー表示に任せる
+  }
+}
+
+document.getElementById("btn-playpause").addEventListener("click", () => sendCommand("PLAY_PAUSE"));
+document.getElementById("btn-stop").addEventListener("click", () => sendCommand("STOP"));
+document.getElementById("btn-prev").addEventListener("click", () => sendCommand("PREV"));
+document.getElementById("btn-next").addEventListener("click", () => sendCommand("NEXT"));
+document.getElementById("btn-voldown").addEventListener("click", () => sendCommand("VOL_DOWN"));
+document.getElementById("btn-volup").addEventListener("click", () => sendCommand("VOL_UP"));
+
+document.getElementById("btn-program-advance").addEventListener("click", async () => {
+  try {
+    await fetch(PROGRAM_ADVANCE_URL, { method: "POST" });
+    poll();
+  } catch (e) {
+    // 未接続時は poll() 側のエラー表示に任せる
+  }
+});
 
 poll();
 setInterval(poll, POLL_MS);

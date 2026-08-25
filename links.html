@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>UltraPlayer - リンク一覧</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    background: #101018;
+    color: #eee;
+    font-family: "Segoe UI", "Yu Gothic UI", sans-serif;
+    min-height: 100%;
+  }
+  #app { max-width: 720px; margin: 0 auto; padding: 32px 24px; }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  .lead { color: #888; font-size: 13px; margin-bottom: 28px; }
+  h2 {
+    font-size: 13px;
+    color: #7de1ff;
+    letter-spacing: 0.1em;
+    margin: 28px 0 10px;
+  }
+  h2:first-of-type { margin-top: 0; }
+  .card {
+    display: block;
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin-bottom: 8px;
+    text-decoration: none;
+    color: inherit;
+  }
+  .card:hover { background: rgba(125,225,255,0.08); border-color: rgba(125,225,255,0.3); }
+  .card .name { font-size: 15px; font-weight: 700; }
+  .card .desc { font-size: 12px; color: #999; margin-top: 3px; }
+  .card .url { font-size: 11px; color: #7de1ff; margin-top: 4px; font-family: Consolas, monospace; }
+  .warn-card { border-color: rgba(224,69,69,0.4); background: rgba(224,69,69,0.06); }
+  .warn-card .desc { color: #ff9d9d; }
+  .api-list { font-size: 12px; color: #aaa; font-family: Consolas, monospace; line-height: 1.9; }
+  .api-list b { color: #ddd; font-family: inherit; }
+  .note { font-size: 12px; color: #666; margin-top: 28px; line-height: 1.7; }
+</style>
+</head>
+<body>
+<div id="app">
+  <h1>UltraPlayer - リンク一覧</h1>
+  <p class="lead">よく使うページをここからまとめて開けます。main.py と bgm-library の起動が必要です。</p>
+
+  <h2>操作者用</h2>
+  <a class="card" href="control.html">
+    <div class="name">control.html - 管理画面</div>
+    <div class="desc">再生操作・音量・プレイリスト・次第の進行・配信画面の位置調整</div>
+  </a>
+  <a class="card" href="http://localhost:4000" target="_blank" rel="noopener">
+    <div class="name">bgm-library - 曲のアップロード/管理</div>
+    <div class="desc">音源アップロード・YouTubeダウンロード・作者検索・次第へのBGM割り当て</div>
+    <div class="url">http://localhost:4000</div>
+  </a>
+
+  <h2>配信用 (OBSのBrowser Sourceに追加)</h2>
+  <a class="card" href="monitor1.html">
+    <div class="name">monitor1.html - モニター1 (左)</div>
+  </a>
+  <a class="card" href="monitor2.html">
+    <div class="name">monitor2.html - モニター2 (右)</div>
+  </a>
+  <a class="card warn-card" href="display.html">
+    <div class="name">display.html</div>
+    <div class="desc">⚠ 単体配信用。monitor1/2.html と併用しないこと</div>
+  </a>
+
+  <h2>ローカルAPI (main.py, ポート8787)</h2>
+  <div class="api-list">
+    <div><b>GET</b> /now-playing - 配信画面向けの現在状態</div>
+    <div><b>GET</b> /admin/status - 管理画面向けの詳細状態(音量・プレイリスト・次第)</div>
+    <div><b>POST</b> /command - 再生操作 {"command": "PLAY_PAUSE"|"STOP"|"NEXT"|"PREV"|"VOL_UP"|"VOL_DOWN"}</div>
+    <div><b>POST</b> /program/advance - 次第を次の項目へ進める</div>
+    <div><b>GET/POST</b> /calib - 配信画面のキャリブレーション状態</div>
+  </div>
+
+  <p class="note">
+    monitor1/2.html・control.html は <code>python -m http.server 8000</code> などで配信し、
+    <code>http://127.0.0.1:8000/</code> 以下から開いてください(<code>file://</code> 直開きだと
+    fetch がブロックされる環境があります)。bgm-library は別プロセス(<code>cd bgm-library &amp;&amp; npm start</code>)
+    で起動します。
+  </p>
+</div>
+</body>
+</html>

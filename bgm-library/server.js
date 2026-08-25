@@ -10,6 +10,9 @@
  *   商用配信されていないため基本的にヒットしない点に注意。
  * - 行事の次第 (program.json, main.py --program と同じファイル) を
  *   このUIから編集し、各項目にライブラリの曲を割り当てられる。
+ * - YouTubeのURLを渡すと yt-dlp + ffmpeg で音声を抽出してライブラリに登録できる
+ *   (要 yt-dlp / ffmpeg のインストール)。ダウンロードした音源の著作権・利用規約は
+ *   利用者側の責任で確認すること。
  */
 
 require("dotenv").config();
@@ -18,6 +21,9 @@ const path = require("path");
 const express = require("express");
 const multer = require("multer");
 const { v4: uuidv4 } = require("uuid");
+const { execFile } = require("child_process");
+const { promisify } = require("util");
+const execFileAsync = promisify(execFile);
 
 const PORT = Number(process.env.PORT || 4000);
 const TRACKS_DIR = path.resolve(__dirname, process.env.TRACKS_DIR || "../tracks");
@@ -25,6 +31,7 @@ const PROGRAM_FILE = path.resolve(__dirname, process.env.PROGRAM_FILE || "../pro
 const LIBRARY_FILE = path.join(TRACKS_DIR, "tracks.json");
 
 const LASTFM_API_KEY = process.env.LASTFM_API_KEY || "";
+const YT_DLP_CMD = process.env.YT_DLP_CMD || "yt-dlp";
 
 fs.mkdirSync(TRACKS_DIR, { recursive: true });
 
@@ -76,6 +83,46 @@ async function searchLastfm(query) {
   const matches = data.results?.trackmatches?.track || [];
   const list = Array.isArray(matches) ? matches : [matches];
   return list.map((t) => ({ title: t.name, artist: t.artist, album: "" }));
+}
+
+// ------------------------------------------------------------
+// YouTubeからのダウンロード (yt-dlp + ffmpeg が必要)
+// ------------------------------------------------------------
+function isYoutubeUrl(raw) {
+  try {
+    const u = new URL(raw);
+    return /(^|\.)youtube\.com$/.test(u.hostname) || u.hostname === "youtu.be";
+  } catch {
+    return false;
+  }
+}
+
+async function fetchYoutubeInfo(url) {
+  const { stdout } = await execFileAsync(
+    YT_DLP_CMD,
+    ["--dump-json", "--no-download", "--no-playlist", url],
+    { maxBuffer: 10 * 1024 * 1024, timeout: 20000 }
+  );
+  const info = JSON.parse(stdout);
+  return { title: info.title || "", author: info.uploader || info.channel || "", duration: info.duration || null };
+}
+
+async function downloadYoutubeAudio(url, id) {
+  await execFileAsync(
+    YT_DLP_CMD,
+    [
+      "-x", "--audio-format", "mp3", "--audio-quality", "0",
+      "--no-playlist",
+      "-o", `${id}.%(ext)s`,
+      url,
+    ],
+    { cwd: TRACKS_DIR, maxBuffer: 10 * 1024 * 1024, timeout: 5 * 60 * 1000 }
+  );
+  const filename = `${id}.mp3`;
+  if (!fs.existsSync(path.join(TRACKS_DIR, filename))) {
+    throw new Error("ダウンロードは完了しましたが、mp3ファイルが見つかりません");
+  }
+  return filename;
 }
 
 // ------------------------------------------------------------
@@ -136,6 +183,61 @@ app.post("/api/tracks", upload.single("file"), (req, res) => {
   library.push(entry);
   saveLibrary(library);
   res.status(201).json(entry);
+});
+
+// YouTube動画の情報(タイトル・投稿者)を取得 (ダウンロードはしない、フォーム補完用)
+app.get("/api/youtube-info", async (req, res) => {
+  const url = (req.query.url || "").trim();
+  if (!url) {
+    res.status(400).json({ error: "urlを指定してください" });
+    return;
+  }
+  if (!isYoutubeUrl(url)) {
+    res.status(400).json({ error: "YouTubeのURLではありません" });
+    return;
+  }
+  try {
+    const info = await fetchYoutubeInfo(url);
+    res.json(info);
+  } catch (e) {
+    res.status(502).json({ error: `情報取得に失敗しました: ${String(e.message || e)}` });
+  }
+});
+
+// YouTube動画から音声をダウンロードしてライブラリに登録
+app.post("/api/tracks/from-youtube", async (req, res) => {
+  const url = (req.body.url || "").trim();
+  const title = (req.body.title || "").trim();
+  if (!url || !isYoutubeUrl(url)) {
+    res.status(400).json({ error: "有効なYouTubeのURLを指定してください" });
+    return;
+  }
+  if (!title) {
+    res.status(400).json({ error: "曲名を入力してください" });
+    return;
+  }
+
+  const id = uuidv4();
+  try {
+    const filename = await downloadYoutubeAudio(url, id);
+    const entry = {
+      id,
+      filename,
+      title,
+      displayTitle: (req.body.displayTitle || "").trim() || title,
+      author: (req.body.author || "").trim(),
+      arranged: req.body.arranged === true || req.body.arranged === "true",
+      note: (req.body.note || "").trim(),
+      sourceUrl: url,
+      createdAt: new Date().toISOString(),
+    };
+    const library = loadLibrary();
+    library.push(entry);
+    saveLibrary(library);
+    res.status(201).json(entry);
+  } catch (e) {
+    res.status(502).json({ error: `ダウンロードに失敗しました: ${String(e.message || e)}` });
+  }
 });
 
 // 曲メタデータ編集 (曲名/表示用曲名/作者/注記/BGM化フラグ)
@@ -210,11 +312,16 @@ app.put("/api/program", (req, res) => {
   res.json(req.body);
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`[bgm-library] http://localhost:${PORT} で起動しました`);
   console.log(`[bgm-library] 音源保存先: ${TRACKS_DIR}`);
   console.log(`[bgm-library] 次第ファイル: ${PROGRAM_FILE}`);
   if (!LASTFM_API_KEY) {
     console.log("[bgm-library] 作者検索(last.fm)は無効です (.env に LASTFM_API_KEY を設定すると使えます)");
+  }
+  try {
+    await execFileAsync(YT_DLP_CMD, ["--version"], { timeout: 5000 });
+  } catch {
+    console.log(`[bgm-library] YouTubeダウンロードは無効です (yt-dlp が見つかりません: '${YT_DLP_CMD}'。pip install yt-dlp とffmpegの導入が必要です)`);
   }
 });
