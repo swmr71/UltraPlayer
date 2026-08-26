@@ -81,7 +81,7 @@
 <div id="conn-error">接続待機中... (main.py が起動しているか確認してください)</div>
 
 <script>
-const API_URL = "http://127.0.0.1:8787/now-playing";
+const API_URL = "/now-playing"; // main.py がこのページ自身も配信しているため相対パス
 const POLL_MS = 700;
 
 const appEl = document.getElementById("app");

@@ -8,8 +8,10 @@
 // 表示だけを行う。物理的に同じ文字サイズ・同じ継ぎ目位置になるよう、
 // cm単位で計算してから各モニター自身のpxPerCmでpx換算する。
 
-const NOW_PLAYING_URL = "http://127.0.0.1:8787/now-playing";
-const CALIB_URL = "http://127.0.0.1:8787/calib";
+// main.py がこのページ自身も配信しているため、相対パスで同じオリジンを指す
+// (127.0.0.1固定だとLAN上の他端末から開いたときにその端末自身を見てしまうため)
+const NOW_PLAYING_URL = "/now-playing";
+const CALIB_URL = "/calib";
 const POLL_MS = 700;
 const DEFAULT_PX_PER_CM = 37.8; // 96dpi相当のフォールバック値(未キャリブレート時)
 
@@ -102,7 +104,7 @@ function extractNowPlaying(data) {
 }
 
 // 転換中は2画面を1枚として繋げず、モニターごとに独立した内容を表示する。
-// 1枚目(左): 大きく「転換中 Next: 次の項目名」
+// 1枚目(左): 大きく「転換中 Next: 次の演目名」
 // 2枚目(右): 小さく「再生中: 曲名/作者」
 function layoutTransition(data) {
   state[MONITOR].innerHeightPx = window.innerHeight;

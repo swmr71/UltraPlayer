@@ -52,10 +52,10 @@
     <div class="name">control.html - 管理画面</div>
     <div class="desc">再生操作・音量・プレイリスト・次第の進行・配信画面の位置調整</div>
   </a>
-  <a class="card" href="http://localhost:4000" target="_blank" rel="noopener">
+  <a class="card" id="bgm-library-link" href="http://localhost:4000" target="_blank" rel="noopener">
     <div class="name">bgm-library - 曲のアップロード/管理</div>
     <div class="desc">音源アップロード・YouTubeダウンロード・作者検索・次第へのBGM割り当て</div>
-    <div class="url">http://localhost:4000</div>
+    <div class="url" id="bgm-library-url">http://localhost:4000</div>
   </a>
 
   <h2>配信用 (OBSのBrowser Sourceに追加)</h2>
@@ -75,16 +75,27 @@
     <div><b>GET</b> /now-playing - 配信画面向けの現在状態</div>
     <div><b>GET</b> /admin/status - 管理画面向けの詳細状態(音量・プレイリスト・次第)</div>
     <div><b>POST</b> /command - 再生操作 {"command": "PLAY_PAUSE"|"STOP"|"NEXT"|"PREV"|"VOL_UP"|"VOL_DOWN"}</div>
-    <div><b>POST</b> /program/advance - 次第を次の項目へ進める</div>
+    <div><b>POST</b> /program/advance - 次第を次の演目へ進める</div>
+    <div><b>POST</b> /program/back - 直前の進行を1つ取り消す</div>
     <div><b>GET/POST</b> /calib - 配信画面のキャリブレーション状態</div>
   </div>
 
   <p class="note">
-    monitor1/2.html・control.html は <code>python -m http.server 8000</code> などで配信し、
-    <code>http://127.0.0.1:8000/</code> 以下から開いてください(<code>file://</code> 直開きだと
-    fetch がブロックされる環境があります)。bgm-library は別プロセス(<code>cd bgm-library &amp;&amp; npm start</code>)
-    で起動します。
+    このページ自体、control.html・monitor1/2.html・display.html は main.py の
+    APIサーバーから配信されます。<code>python main.py --dir ./tracks</code> を実行した状態で
+    <code>http://127.0.0.1:8787/links.html</code>(ポートは <code>--api-port</code> で変更可)
+    を開いてください(<code>file://</code> 直開きだと fetch がブロックされる環境があります)。
+    同じルーター配下の他端末からは <code>http://(このPCのLAN内IP):8787/links.html</code>
+    でアクセスできます。
+    bgm-library は別プロセス(<code>cd bgm-library &amp;&amp; npm start</code>)で起動します。
   </p>
 </div>
+<script>
+  // bgm-libraryはmain.pyとは別ポート(既定4000)なので、このページを開いたホスト名を
+  // 使って組み立てる(LAN上の他端末からこのページを開いた場合でも正しいリンクになる)
+  const bgmLibraryUrl = `http://${location.hostname}:4000`;
+  document.getElementById("bgm-library-link").href = bgmLibraryUrl;
+  document.getElementById("bgm-library-url").textContent = bgmLibraryUrl;
+</script>
 </body>
 </html>

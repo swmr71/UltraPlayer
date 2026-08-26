@@ -101,9 +101,19 @@
   #program-card .mode { color: #7de1ff; font-weight: 700; letter-spacing: 0.1em; font-size: 12px; margin-bottom: 6px; }
   #program-card .item-name { font-size: 18px; font-weight: 700; margin-bottom: 4px; }
   #program-card .sub { color: #999; }
+  #program-card .playlist-label { margin-top: 10px; font-size: 11px; color: #888; letter-spacing: 0.05em; }
+  #program-card .playlist-tracks { margin-top: 4px; display: flex; flex-direction: column; gap: 3px; }
+  #program-card .playlist-tracks .track {
+    display: flex; gap: 6px; padding: 3px 6px; border-radius: 4px;
+    background: rgba(255,255,255,0.03); color: #aaa; font-size: 12px;
+  }
+  #program-card .playlist-tracks .track.playing {
+    background: rgba(125,225,255,0.12); color: #fff; font-weight: 700;
+  }
+  #program-card .playlist-tracks .track .num { opacity: 0.5; width: 1.5em; flex-shrink: 0; }
+  #program-card .btn-row { display: flex; gap: 8px; margin-top: 12px; }
   #program-card button {
-    margin-top: 12px;
-    width: 100%;
+    flex: 1;
     padding: 10px;
     border-radius: 8px;
     border: 1px solid rgba(184,139,255,0.4);
@@ -113,6 +123,14 @@
     cursor: pointer;
   }
   #program-card button:hover { background: rgba(184,139,255,0.28); }
+  #program-card button.back-btn {
+    flex: 0 0 auto;
+    border-color: rgba(255,255,255,0.15);
+    background: rgba(255,255,255,0.05);
+    color: #ccc;
+  }
+  #program-card button.back-btn:hover { background: rgba(255,255,255,0.1); }
+  #program-card button:disabled { opacity: 0.4; cursor: default; }
 
   #playlist { display: flex; flex-direction: column; gap: 6px; }
   .track-row {
@@ -220,7 +238,7 @@
     </div>
     <div id="meta">
       <span id="conn-dot"></span><span id="conn-text">接続待機中...</span><br><br>
-      <b>API:</b> http://127.0.0.1:8787/now-playing<br>
+      <b>API:</b> /now-playing (このページと同じホスト:ポート)<br>
       <b>操作:</b> main.py側でハンドサイン / 音声コマンド<br>
       <b>配信用画面:</b> monitor1.html (左) / monitor2.html (右) を各モニターでフルスクリーン表示 → OBSでは Browser Source 推奨<br>
       <b>配信画面の調整:</b> 右のパネルから調整します(monitor1/2.html側では操作不要)
@@ -241,7 +259,14 @@
       <div class="mode" id="program-mode">-</div>
       <div class="item-name" id="program-item">-</div>
       <div class="sub" id="program-sub"></div>
-      <button id="btn-program-advance">次の項目へ (N)</button>
+      <div id="program-playlist-block" style="display:none;">
+        <div class="playlist-label" id="program-playlist-label"></div>
+        <div class="playlist-tracks" id="program-playlist-tracks"></div>
+      </div>
+      <div class="btn-row">
+        <button class="back-btn" id="btn-program-back">戻る (B)</button>
+        <button id="btn-program-advance">次の演目へ (N)</button>
+      </div>
     </div>
 
     <h2>PLAYLIST</h2>
@@ -294,10 +319,13 @@
 </div>
 
 <script>
-const ADMIN_STATUS_URL = "http://127.0.0.1:8787/admin/status";
-const COMMAND_URL = "http://127.0.0.1:8787/command";
-const PROGRAM_ADVANCE_URL = "http://127.0.0.1:8787/program/advance";
-const CALIB_URL = "http://127.0.0.1:8787/calib";
+// main.py がこのページ自身も配信しているため、相対パスで同じオリジンを指す
+// (127.0.0.1固定だとLAN上の他端末から開いたときにその端末自身を見てしまうため)
+const ADMIN_STATUS_URL = "/admin/status";
+const COMMAND_URL = "/command";
+const PROGRAM_ADVANCE_URL = "/program/advance";
+const PROGRAM_BACK_URL = "/program/back";
+const CALIB_URL = "/calib";
 const POLL_MS = 700;
 
 const statusBadge = document.getElementById("status-badge");
@@ -312,6 +340,15 @@ const programCard = document.getElementById("program-card");
 const programMode = document.getElementById("program-mode");
 const programItem = document.getElementById("program-item");
 const programSub = document.getElementById("program-sub");
+const programBackBtn = document.getElementById("btn-program-back");
+const programAdvanceBtn = document.getElementById("btn-program-advance");
+const programPlaylistBlock = document.getElementById("program-playlist-block");
+const programPlaylistLabel = document.getElementById("program-playlist-label");
+const programPlaylistTracks = document.getElementById("program-playlist-tracks");
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
 
 function renderPlaylist(player) {
   const tracks = player.tracks || [];
@@ -321,10 +358,27 @@ function renderPlaylist(player) {
     const row = document.createElement("div");
     row.className = "track-row" + (i === player.index ? " active" : "");
     const t = tracks[i];
-    const name = t ? t.title + (t.arranged ? " [BGM化]" : "") : `Track ${i + 1}`;
+    const name = t ? escapeHtml(t.title) + (t.arranged ? " [BGM化]" : "") : `Track ${i + 1}`;
     row.innerHTML = `<span class="track-num">${String(i + 1).padStart(2, "0")}</span><span>${name}</span>`;
     playlistEl.appendChild(row);
   }
+}
+
+function renderProgramPlaylist(program) {
+  const tracks = program.current_playlist || program.upcoming_playlist || [];
+  if (!tracks.length) {
+    programPlaylistBlock.style.display = "none";
+    return;
+  }
+  programPlaylistBlock.style.display = "";
+  programPlaylistLabel.textContent = program.current_playlist
+    ? "再生中のプレイリスト (今流せる曲)"
+    : "次に進めると流れるプレイリスト";
+  programPlaylistTracks.innerHTML = tracks.map((t, i) => {
+    const playing = program.current_playlist && i === program.current_playlist_index;
+    const author = t.author ? ` / ${escapeHtml(t.author)}` : "";
+    return `<div class="track${playing ? " playing" : ""}"><span class="num">${i + 1}</span><span>${escapeHtml(t.title)}${author}${playing ? " ▶" : ""}</span></div>`;
+  }).join("");
 }
 
 function renderProgram(program) {
@@ -333,15 +387,27 @@ function renderProgram(program) {
     return;
   }
   programCard.style.display = "";
-  if (program.mode === "transition") {
+  programBackBtn.disabled = !program.can_go_back;
+  renderProgramPlaylist(program);
+
+  if (program.mode === "ready") {
+    programMode.textContent = "開始前";
+    programItem.textContent = program.next_item;
+    programSub.textContent = program.starts_with === "transition"
+      ? "最初は転換(BGM再生)から始まります"
+      : "BGMなしでこの演目から始まります";
+    programAdvanceBtn.textContent = "開始する (N)";
+  } else if (program.mode === "transition") {
     programMode.textContent = "転換中";
     programItem.textContent = `Next: ${program.next_item}`;
     const author = program.bgm.author ? ` / ${program.bgm.author}` : "";
     programSub.textContent = `再生中BGM: ${program.bgm.title}${author}`;
+    programAdvanceBtn.textContent = "次の演目へ (N)";
   } else {
     programMode.textContent = "上演中";
     programItem.textContent = program.current_item;
-    programSub.textContent = `${program.current_idx + 1} / ${program.total_items} 項目`;
+    programSub.textContent = `${program.current_idx + 1} / ${program.total_items} 演目`;
+    programAdvanceBtn.textContent = "次の演目へ (N)";
   }
 }
 
@@ -399,9 +465,18 @@ document.getElementById("btn-next").addEventListener("click", () => sendCommand(
 document.getElementById("btn-voldown").addEventListener("click", () => sendCommand("VOL_DOWN"));
 document.getElementById("btn-volup").addEventListener("click", () => sendCommand("VOL_UP"));
 
-document.getElementById("btn-program-advance").addEventListener("click", async () => {
+programAdvanceBtn.addEventListener("click", async () => {
   try {
     await fetch(PROGRAM_ADVANCE_URL, { method: "POST" });
+    poll();
+  } catch (e) {
+    // 未接続時は poll() 側のエラー表示に任せる
+  }
+});
+
+programBackBtn.addEventListener("click", async () => {
+  try {
+    await fetch(PROGRAM_BACK_URL, { method: "POST" });
     poll();
   } catch (e) {
     // 未接続時は poll() 側のエラー表示に任せる

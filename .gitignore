@@ -229,4 +229,5 @@ tracks/*.mp3
 tracks/*.wav
 tracks/*.ogg
 tracks/tracks.json
+tracks/playlists.json
 program.json

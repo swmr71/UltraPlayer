@@ -23,16 +23,16 @@ Webカメラでハンドサインを認識してBGMを操作するプレイヤ�
 使い方:
     python main.py --dir ./tracks
     python main.py --dir ./tracks --voice
-    python main.py --dir ./tracks --program program.json   # 行事の次第と連動 (Nキーで次の項目へ)
+    python main.py --dir ./tracks --program program.json   # 行事の次第と連動 (Nキーで次の演目へ)
 
 行事の次第(演目リスト)と連動させる場合:
-    --program で program.json のようなファイルを指定すると、Nキーで次の項目に
-    進行できる。項目にBGMが指定されていれば転換中としてそのBGMを再生し、
+    --program で program.json のようなファイルを指定すると、Nキーで次の演目に
+    進行できる。演目にBGMが指定されていれば転換中としてそのBGMを再生し、
     もう一度Nキーを押すと上演中(BGM停止)に切り替わる。
-    /now-playing API は、上演中は項目名のみ、転換中は次の項目名+再生中BGMを返す。
+    /now-playing API は、上演中は演目名のみ、転換中は次の演目名+再生中BGMを返す。
     詳しくは program.example.json を参照。
 
-    BGMはtracks.jsonの曲id (UUID) で指定する。tracks.json や、発表項目への
+    BGMはtracks.jsonの曲id (UUID) で指定する。tracks.json や、発表演目への
     曲割り当ては手で書かず、bgm-library/ の管理アプリ (Node.js) から行う。
         cd bgm-library
         npm install
@@ -51,6 +51,8 @@ import threading
 import queue
 import math
 import json
+import shutil
+import subprocess
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -471,66 +473,156 @@ class BGMPlayer:
 
 
 # ------------------------------------------------------------
-# 行事の次第(演目リスト)を管理し、BGMプレイヤーと連動させるクラス
+# 行事の次第(演目リスト)を読み込み・管理するための補助
+# ------------------------------------------------------------
+def load_playlists(track_dir: str) -> dict:
+    """tracks/playlists.json (bgm-library で作成する名前付き転換用プレイリスト) を
+    id -> 曲idリスト の辞書として読み込む。ファイルが無ければ空辞書を返す。
+    """
+    path = os.path.join(track_dir, "playlists.json")
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            entries = json.load(f)
+        return {p["id"]: p.get("trackIds", []) for p in entries}
+    except Exception as e:
+        print(f"[警告] playlists.jsonの読み込みに失敗しました: {e}")
+        return {}
+
+
 # program.json 形式:
 #   [
-#     {"name": "開会の言葉", "bgm": []},
-#     {"name": "劇『桃太郎』", "bgm": ["3fa2c1e4-....", "9b7e...."]},
-#     {"name": "合唱", "bgm": []}
+#     {"name": "開会の言葉", "playlistId": null},
+#     {"name": "劇『桃太郎』", "playlistId": "3fa2c1e4-...."},
+#     {"name": "合唱", "playlistId": null}
 #   ]
-# "bgm" はライブラリ(tracks.json)の曲idの配列(プレイリスト)。bgm-library アプリの
-# UIから発表項目に曲を割り当てて保存すると、この形式で書き出される。
-# "bgm" が1曲以上ある項目は、その項目へ転換する際に指定BGMを順番に再生し、
-# 最後まで再生し終えたら先頭に戻ってループする(Nキーで転換完了するまで無音にしない)。
-# 空配列 [] の項目はBGMなしで上演される(劇・演奏など)。
+# "playlistId" はライブラリ(playlists.json)の名前付きプレイリストのidを指す。
+# bgm-library アプリのUIから各演目に転換用プレイリストを割り当てて保存すると、
+# この形式で書き出される。playlistId が無い(null)演目はBGMなしで上演される
+# (劇・演奏など)。プレイリストは1曲以上あればその演目へ転換する際に順番に再生し、
+# 最後まで再生し終えたら先頭に戻ってループする(進行するまで無音にしない)。
+#
+# 後方互換: 旧形式の "bgm": [曲id, ...] (プレイリストを介さないインライン指定)
+# が残っている演目は、そのまま読み込んで使う。
 # ------------------------------------------------------------
 class ProgramController:
     def __init__(self, path: str, player: "BGMPlayer"):
         with open(path, "r", encoding="utf-8") as f:
             self.items = json.load(f)
         if not self.items:
-            raise RuntimeError(f"{path} に項目がありません")
+            raise RuntimeError(f"{path} に演目がありません")
         self.player = player
+        self.playlists = load_playlists(player.track_dir)
+        self._library_by_id = {t["id"]: t for t in player.library}
+
+        self.started = False  # 最初の進行(N)がまだ押されていない状態
         self.current_idx = 0
         self.target_idx = None
         self.mode = "performing"  # "performing"(上演中・BGMなし) | "transition"(転換中・BGM再生)
         self.bgm_queue = []
         self.bgm_pos = 0
+        self._history = []  # advance()前のスナップショットのスタック (戻る用)
+        # 同じプレイリストを複数の演目で使い回したとき、毎回1曲目からではなく
+        # 前回流れ終わった曲の次から再生されるようにするための再開位置
+        # (playlistId -> 次に再生を始めるインデックス)
+        self.playlist_positions = {}
 
-    @staticmethod
-    def _bgm_ids(item: dict):
-        bgm = item.get("bgm") or []
+    def _bgm_ids(self, item: dict):
+        playlist_id = item.get("playlistId")
+        if playlist_id:
+            return list(self.playlists.get(playlist_id, []))
+        bgm = item.get("bgm") or []  # 後方互換 (インライン指定)
         if isinstance(bgm, str):
             bgm = [bgm]
         return bgm
 
+    def _snapshot(self) -> dict:
+        return {
+            "started": self.started,
+            "current_idx": self.current_idx,
+            "target_idx": self.target_idx,
+            "mode": self.mode,
+            "bgm_queue": list(self.bgm_queue),
+            "bgm_pos": self.bgm_pos,
+            "playlist_positions": dict(self.playlist_positions),
+        }
+
+    def _restore(self, snap: dict):
+        self.started = snap["started"]
+        self.current_idx = snap["current_idx"]
+        self.target_idx = snap["target_idx"]
+        self.mode = snap["mode"]
+        self.bgm_queue = snap["bgm_queue"]
+        self.bgm_pos = snap["bgm_pos"]
+        self.playlist_positions = snap["playlist_positions"]
+
+    def _start_transition(self, target_idx: int) -> str:
+        item = self.items[target_idx]
+        playlist_id = item.get("playlistId")
+        self.bgm_queue = self._bgm_ids(item)
+        # 同じプレイリストを使い回す場合は、前回流れ終わった曲の次から再生する
+        self.bgm_pos = self.playlist_positions.get(playlist_id, 0) % len(self.bgm_queue) if playlist_id else 0
+        if not self.player.play_by_id(self.bgm_queue[self.bgm_pos]):
+            print(f"[警告] ライブラリに該当曲が見つかりません (id={self.bgm_queue[self.bgm_pos]})")
+        self.target_idx = target_idx
+        self.mode = "transition"
+        return f"[PROGRAM] 転換中 -> {item['name']}"
+
+    def _start_performing(self, idx: int) -> str:
+        self.player.stop()
+        self.bgm_queue = []
+        self.bgm_pos = 0
+        self.current_idx = idx
+        self.target_idx = None
+        self.mode = "performing"
+        return f"[PROGRAM] 上演開始: {self.items[idx]['name']}"
+
     def advance(self) -> str:
+        """次第を1つ進める。最初の呼び出しは演目1を開始する
+        (演目1にプレイリストがあれば、まずその転換から明示的に始まる)。
+        """
+        if not self.started:
+            snap = self._snapshot()
+            self.started = True
+            bgm_ids = self._bgm_ids(self.items[0])
+            msg = self._start_transition(0) if bgm_ids else self._start_performing(0)
+            self._history.append(snap)
+            return msg
+
         if self.mode == "transition":
-            self.player.stop()
-            self.bgm_queue = []
-            self.bgm_pos = 0
-            self.current_idx = self.target_idx
-            self.target_idx = None
-            self.mode = "performing"
-            return f"[PROGRAM] 上演開始: {self.items[self.current_idx]['name']}"
+            snap = self._snapshot()
+            # このプレイリストの再開位置を記録 (次に使い回すときは続きの曲から)
+            playlist_id = self.items[self.target_idx].get("playlistId")
+            if playlist_id and self.bgm_queue:
+                self.playlist_positions[playlist_id] = (self.bgm_pos + 1) % len(self.bgm_queue)
+            msg = self._start_performing(self.target_idx)
+            self._history.append(snap)
+            return msg
 
         next_idx = self.current_idx + 1
         if next_idx >= len(self.items):
-            return "[PROGRAM] 次第は最後の項目です"
+            return "[PROGRAM] 次第は最後の演目です"
 
-        next_item = self.items[next_idx]
-        bgm_ids = self._bgm_ids(next_item)
-        if bgm_ids:
-            self.bgm_queue = bgm_ids
-            self.bgm_pos = 0
-            if not self.player.play_by_id(self.bgm_queue[0]):
-                print(f"[警告] ライブラリに該当曲が見つかりません (id={self.bgm_queue[0]})")
-            self.target_idx = next_idx
-            self.mode = "transition"
-            return f"[PROGRAM] 転換中 -> {next_item['name']}"
-        else:
-            self.current_idx = next_idx
-            return f"[PROGRAM] 上演開始: {next_item['name']}"
+        snap = self._snapshot()
+        bgm_ids = self._bgm_ids(self.items[next_idx])
+        msg = self._start_transition(next_idx) if bgm_ids else self._start_performing(next_idx)
+        self._history.append(snap)
+        return msg
+
+    def back(self) -> str:
+        """直前の advance() を取り消して1つ前の状態に戻す。"""
+        if not self._history:
+            return "[PROGRAM] これ以上戻れません"
+        self._restore(self._history.pop())
+        if not self.started:
+            self.player.stop()
+            return "[PROGRAM] 開始前に戻りました"
+        if self.mode == "transition":
+            if self.bgm_queue:
+                self.player.play_by_id(self.bgm_queue[self.bgm_pos])
+            return f"[PROGRAM] 転換中に戻りました -> {self.items[self.target_idx]['name']}"
+        return f"[PROGRAM] 上演中に戻りました: {self.items[self.current_idx]['name']}"
 
     def tick(self):
         """転換中のBGMが最後まで再生し終わったら次の曲へ自動的に進める。
@@ -544,6 +636,13 @@ class ProgramController:
         self.player.play_by_id(self.bgm_queue[self.bgm_pos])
 
     def status(self) -> dict:
+        if not self.started:
+            starts_with = "transition" if self._bgm_ids(self.items[0]) else "performing"
+            return {
+                "mode": "ready",
+                "starts_with": starts_with,
+                "next_item": self.items[0]["name"],
+            }
         if self.mode == "transition":
             return {
                 "mode": "transition",
@@ -555,12 +654,39 @@ class ProgramController:
             "current_item": self.items[self.current_idx]["name"],
         }
 
+    def _resolve_tracks(self, track_ids):
+        """曲idのリストを、管理画面表示用の {id, title, author} のリストに変換する"""
+        result = []
+        for tid in track_ids:
+            t = self._library_by_id.get(tid)
+            result.append({
+                "id": tid,
+                "title": t["displayTitle"] if t else "(見つかりません)",
+                "author": t["author"] if t else "",
+            })
+        return result
+
     def admin_status(self) -> dict:
-        """管理画面(control.html)向けの詳細ステータス。進行位置と項目一覧を含む。"""
+        """管理画面(control.html)向けの詳細ステータス。進行位置・演目一覧に加え、
+        今再生できる(転換中)/ 次に進めると再生される(上演中・開始前)曲の
+        プレイリストを明示する。
+        """
         info = self.status()
+        info["started"] = self.started
+        info["can_go_back"] = bool(self._history)
         info["current_idx"] = self.current_idx
         info["total_items"] = len(self.items)
         info["items"] = [item["name"] for item in self.items]
+
+        if self.mode == "transition":
+            info["current_playlist"] = self._resolve_tracks(self.bgm_queue)
+            info["current_playlist_index"] = self.bgm_pos
+        else:
+            upcoming_idx = 0 if not self.started else self.current_idx + 1
+            if upcoming_idx < len(self.items):
+                info["upcoming_playlist"] = self._resolve_tracks(self._bgm_ids(self.items[upcoming_idx]))
+            else:
+                info["upcoming_playlist"] = []
         return info
 
 
@@ -627,7 +753,7 @@ def make_now_playing_server(
     """GET /now-playing で現在状態、GET/POST /calib でキャリブレーション状態を扱うHTTPサーバーを作る
 
     program が指定されている場合、/now-playing は行事次第の進行状況
-    (上演中なら項目名のみ、転換中なら次の項目名+再生中BGM) を返す。
+    (上演中なら演目名のみ、転換中なら次の演目名+再生中BGM) を返す。
     未指定の場合は従来通り player.status() を返す。
 
     command_queue を指定すると、control.html などの管理画面からの操作を
@@ -658,7 +784,7 @@ def make_now_playing_server(
             self.end_headers()
 
         def do_GET(self):
-            if self.path in ("/", "/now-playing"):
+            if self.path == "/now-playing":
                 self._send_json(program.status() if program else player.status())
             elif self.path == "/admin/status":
                 self._send_json({
@@ -668,8 +794,39 @@ def make_now_playing_server(
             elif self.path == "/calib":
                 self._send_json(calib_store.get())
             else:
+                self._serve_static()
+
+        # links.html / control.html / monitor1-2.html / display.html などを
+        # このAPIサーバー自身から配信する。これにより `python -m http.server`
+        # を別途立てなくても http://127.0.0.1:<api-port>/control.html 等で開ける。
+        # ディレクトリ探索を避けるため、プロジェクト直下のファイル名のみ許可する。
+        STATIC_CONTENT_TYPES = {
+            ".html": "text/html; charset=utf-8",
+            ".js": "application/javascript; charset=utf-8",
+            ".css": "text/css; charset=utf-8",
+        }
+        STATIC_DIR = os.path.dirname(os.path.abspath(__file__))
+
+        def _serve_static(self):
+            url_path = self.path.split("?", 1)[0]
+            if url_path == "/":
+                url_path = "/links.html"
+            filename = os.path.basename(url_path)
+            ext = os.path.splitext(filename)[1].lower()
+            file_path = os.path.join(self.STATIC_DIR, filename)
+
+            if ext not in self.STATIC_CONTENT_TYPES or not os.path.isfile(file_path):
                 self.send_response(404)
                 self.end_headers()
+                return
+
+            with open(file_path, "rb") as f:
+                body = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", self.STATIC_CONTENT_TYPES[ext])
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
         def do_POST(self):
             if self.path == "/calib":
@@ -707,6 +864,12 @@ def make_now_playing_server(
                 else:
                     command_queue.put("PROGRAM_NEXT")
                     self._send_json({"queued": "PROGRAM_NEXT"}, status=202)
+            elif self.path == "/program/back":
+                if program is None or command_queue is None:
+                    self._send_json({"error": "program not enabled (--program を指定してください)"}, status=400)
+                else:
+                    command_queue.put("PROGRAM_BACK")
+                    self._send_json({"queued": "PROGRAM_BACK"}, status=202)
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -714,7 +877,50 @@ def make_now_playing_server(
         def log_message(self, format, *args):
             pass  # コンソールを汚さないようアクセスログは出さない
 
-    return ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    return ThreadingHTTPServer(("0.0.0.0", port), Handler)
+
+
+# ------------------------------------------------------------
+# bgm-library (Node.js) の自動起動
+# main.py と一緒に `cd bgm-library && npm start` する手間を省くため、
+# 子プロセスとして起動し、main.py終了時に一緒に終了させる。
+# ------------------------------------------------------------
+BGM_LIBRARY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bgm-library")
+
+
+def start_bgm_library():
+    server_js = os.path.join(BGM_LIBRARY_DIR, "server.js")
+    if not os.path.isfile(server_js):
+        return None
+
+    node_cmd = shutil.which("node")
+    if not node_cmd:
+        print("[警告] node が見つからないため bgm-library を自動起動できませんでした")
+        print("       手動で `cd bgm-library && npm start` してください")
+        return None
+
+    if not os.path.isdir(os.path.join(BGM_LIBRARY_DIR, "node_modules")):
+        print("[警告] bgm-library/node_modules がないため自動起動をスキップしました")
+        print("       `cd bgm-library && npm install` を実行してください")
+        return None
+
+    try:
+        proc = subprocess.Popen([node_cmd, "server.js"], cwd=BGM_LIBRARY_DIR)
+        print("[bgm-library] 自動起動しました (http://localhost:4000)")
+        return proc
+    except Exception as e:
+        print(f"[警告] bgm-library を自動起動できませんでした: {e}")
+        return None
+
+
+def stop_bgm_library(proc):
+    if proc is None or proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
 
 
 def apply_command(player: "BGMPlayer", command: str, prefix: str = "") -> str:
@@ -752,8 +958,13 @@ def main():
     parser.add_argument("--cooldown", type=float, default=1.0, help="同一ジェスチャーの連続発火防止秒数")
     parser.add_argument("--voice", action="store_true", help="音声コマンドも有効化する (要 vosk, pyaudio)")
     parser.add_argument("--api-port", type=int, default=8787, help="現在再生中の曲情報を返すHTTP APIのポート (0で無効化)")
-    parser.add_argument("--program", type=str, default=None, help="行事の次第(演目リスト)を定義したJSONファイル。指定するとNキーで項目を進行できる")
+    parser.add_argument("--program", type=str, default=None, help="行事の次第(演目リスト)を定義したJSONファイル。指定するとNキーで演目を進行できる")
+    parser.add_argument("--no-library", action="store_true", help="bgm-library (Node.js) の自動起動をスキップする")
     args = parser.parse_args()
+
+    bgm_library_proc = None
+    if not args.no_library:
+        bgm_library_proc = start_bgm_library()
 
     player = BGMPlayer(args.dir)
     recognizer = GestureRecognizer(cooldown_sec=args.cooldown)
@@ -762,7 +973,7 @@ def main():
     if args.program:
         try:
             program = ProgramController(args.program, player)
-            print(f"[PROGRAM] {args.program} を読み込みました ({len(program.items)}項目)")
+            print(f"[PROGRAM] {args.program} を読み込みました ({len(program.items)}演目)")
         except Exception as e:
             print(f"[警告] 次第ファイルを読み込めませんでした: {e}")
 
@@ -785,6 +996,7 @@ def main():
             api_thread = threading.Thread(target=api_server.serve_forever, daemon=True)
             api_thread.start()
             print(f"[API] http://127.0.0.1:{args.api_port}/now-playing で再生情報を取得できます")
+            print(f"[管理画面] http://127.0.0.1:{args.api_port}/links.html からcontrol.html等を開けます")
         except OSError as e:
             print(f"[警告] APIサーバーを起動できませんでした: {e}")
 
@@ -797,6 +1009,9 @@ def main():
             if queued_command == "PROGRAM_NEXT":
                 if program:
                     status_text = program.advance()
+            elif queued_command == "PROGRAM_BACK":
+                if program:
+                    status_text = program.back()
             else:
                 status_text = apply_command(player, queued_command, prefix="CMD")
 
@@ -853,19 +1068,24 @@ def main():
                              font_size=20, color=(0, 255, 0))
                 if program:
                     p_status = program.status()
-                    if p_status["mode"] == "performing":
+                    if p_status["mode"] == "ready":
+                        prefix = "転換から開始: " if p_status["starts_with"] == "transition" else "開始: "
+                        program_line = f"(開始前) {prefix}{p_status['next_item']}"
+                    elif p_status["mode"] == "performing":
                         program_line = f"上演中: {p_status['current_item']}"
                     else:
                         program_line = f"転換中 -> {p_status['next_item']}"
                     draw_text_ja(frame, f"次第: {program_line}", (10, 68),
                                  font_size=20, color=(0, 255, 255))
 
-                cv2.imshow("BGM Hand Sign Player (q to quit, n: next item)", frame)
+                cv2.imshow("BGM Hand Sign Player (q to quit, n: next item, b: back)", frame)
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord("q"):
                     break
                 elif key == ord("n") and program:
                     status_text = program.advance()
+                elif key == ord("b") and program:
+                    status_text = program.back()
 
         cap.release()
         cv2.destroyAllWindows()
@@ -886,6 +1106,7 @@ def main():
         voice_controller.stop()
     if api_server:
         api_server.shutdown()
+    stop_bgm_library(bgm_library_proc)
 
 
 if __name__ == "__main__":

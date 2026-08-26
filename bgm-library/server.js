@@ -9,22 +9,26 @@
  *   (LASTFM_API_KEY 未設定なら無効)。魔王魂などのフリーBGM素材は
  *   商用配信されていないため基本的にヒットしない点に注意。
  * - 行事の次第 (program.json, main.py --program と同じファイル) を
- *   このUIから編集し、各項目にライブラリの曲を割り当てられる。
+ *   このUIから編集する。転換に使うBGMは、名前付きの共通プレイリスト
+ *   (playlists.json) を作成して各演目に付け外しで割り当てる方式。
  * - YouTubeのURLを渡すと yt-dlp + ffmpeg で音声を抽出してライブラリに登録できる
  *   (要 yt-dlp / ffmpeg のインストール)。ダウンロードした音源の著作権・利用規約は
  *   利用者側の責任で確認すること。
  * - 登録済みの曲から「ボーカル除去」でDemucs (要 pip install demucs、main.py と
  *   同じvenv) を実行し、インストゥルメンタル版を新しい曲として追加できる。
- *   CPU実行のため曲の長さと同程度〜数倍の処理時間がかかる。
+ *   CPU実行(GPU/CUDA非搭載機では自動でCPUになる)のため曲の長さと同程度〜
+ *   数倍の処理時間がかかる。POST /api/tracks/:id/remove-vocals はジョブIDを
+ *   即返し、GET /api/jobs/:id をポーリングすると進捗(%)を取得できる。
  */
 
 require("dotenv").config();
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const express = require("express");
 const multer = require("multer");
 const { v4: uuidv4 } = require("uuid");
-const { execFile } = require("child_process");
+const { execFile, spawn } = require("child_process");
 const { promisify } = require("util");
 const execFileAsync = promisify(execFile);
 
@@ -32,6 +36,7 @@ const PORT = Number(process.env.PORT || 4000);
 const TRACKS_DIR = path.resolve(__dirname, process.env.TRACKS_DIR || "../tracks");
 const PROGRAM_FILE = path.resolve(__dirname, process.env.PROGRAM_FILE || "../program.json");
 const LIBRARY_FILE = path.join(TRACKS_DIR, "tracks.json");
+const PLAYLISTS_FILE = path.join(TRACKS_DIR, "playlists.json");
 
 const LASTFM_API_KEY = process.env.LASTFM_API_KEY || "";
 const YT_DLP_CMD = process.env.YT_DLP_CMD || "yt-dlp";
@@ -81,6 +86,23 @@ function loadProgram() {
 
 function saveProgram(items) {
   fs.writeFileSync(PROGRAM_FILE, JSON.stringify(items, null, 2), "utf-8");
+}
+
+// ------------------------------------------------------------
+// 転換用プレイリスト (playlists.json) の読み書き
+// 名前付きの共通プレイリストを作成し、各演目の転換に付け外しで割り当てる。
+// ------------------------------------------------------------
+function loadPlaylists() {
+  if (!fs.existsSync(PLAYLISTS_FILE)) return [];
+  try {
+    return JSON.parse(fs.readFileSync(PLAYLISTS_FILE, "utf-8"));
+  } catch {
+    return [];
+  }
+}
+
+function savePlaylists(list) {
+  fs.writeFileSync(PLAYLISTS_FILE, JSON.stringify(list, null, 2), "utf-8");
 }
 
 // ------------------------------------------------------------
@@ -142,17 +164,78 @@ async function downloadYoutubeAudio(url, id) {
 }
 
 // ------------------------------------------------------------
-// AIボーカル除去 (Demucs, htdemucsモデル)
+// 非同期ジョブ管理 (ボーカル除去は数十秒〜数分かかるため、
+// レスポンスを待たせずジョブIDを返し、進捗をポーリングで取得できるようにする)
 // ------------------------------------------------------------
-async function removeVocals(sourcePath, newId) {
+const jobs = new Map(); // jobId -> {status: "running"|"done"|"error", progress, error?, result?}
+
+function createJob() {
+  const id = uuidv4();
+  jobs.set(id, { status: "running", progress: 0 });
+  return id;
+}
+
+// ------------------------------------------------------------
+// AIボーカル除去 (Demucs, htdemucsモデル)
+// このマシンにはNVIDIA GPU(CUDA)が無くCPU実行のみのため、GPUへのオフロードは
+// できない。CPUのマルチプロセス並列化(-j)も試したが、ワーカーごとにモデルを
+// 再ロードするオーバーヘッドが上回り単一トラックではかえって遅くなったため
+// 採用していない。代わりにDemucsの進捗バー(標準エラー出力)を正規表現でパース
+// してジョブの進捗(0-99%)に反映している。
+//
+// タイムアウトは合計時間の固定上限ではなく「無操作(標準エラー出力が一定時間
+// 止まった)」方式にしている。長い曲やCPUが遅い環境でも、進捗が出続けている
+// 限り処理を継続でき、本当にハングした場合だけ中断する。
+// ------------------------------------------------------------
+const DEMUCS_INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000;
+
+function runDemucs(sourcePath, workDir, onProgress) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      PYTHON_CMD,
+      ["-m", "demucs", "--two-stems=vocals", "-o", workDir, sourcePath],
+      { windowsHide: true }
+    );
+
+    let stderrTail = "";
+    let timer;
+    const resetTimer = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        child.kill();
+        reject(new Error(`ボーカル除去が${DEMUCS_INACTIVITY_TIMEOUT_MS / 60000}分間応答がないため中断しました`));
+      }, DEMUCS_INACTIVITY_TIMEOUT_MS);
+    };
+    resetTimer();
+
+    child.stderr.on("data", (chunk) => {
+      resetTimer();
+      stderrTail += chunk.toString();
+      if (stderrTail.length > 4000) stderrTail = stderrTail.slice(-4000);
+      const matches = [...stderrTail.matchAll(/(\d+(?:\.\d+)?)%\|/g)];
+      if (matches.length) {
+        onProgress(Math.min(99, Math.round(parseFloat(matches[matches.length - 1][1]))));
+      }
+    });
+
+    child.on("error", (e) => {
+      clearTimeout(timer);
+      reject(e);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve();
+      else reject(new Error(`demucsがエラー終了しました (code ${code}): ${stderrTail.slice(-500)}`));
+    });
+  });
+}
+
+async function removeVocals(sourcePath, newId, onProgress) {
   const workDir = path.join(TRACKS_DIR, `.demucs-${newId}`);
   fs.mkdirSync(workDir, { recursive: true });
   try {
-    await execFileAsync(
-      PYTHON_CMD,
-      ["-m", "demucs", "--two-stems=vocals", "-o", workDir, sourcePath],
-      { maxBuffer: 20 * 1024 * 1024, timeout: 10 * 60 * 1000 }
-    );
+    await runDemucs(sourcePath, workDir, onProgress);
+    onProgress(99);
 
     const baseName = path.parse(sourcePath).name;
     const wavPath = path.join(workDir, "htdemucs", baseName, "no_vocals.wav");
@@ -288,7 +371,7 @@ app.post("/api/tracks/from-youtube", async (req, res) => {
 });
 
 // ボーカル除去 (Demucs) を実行し、インストゥルメンタル版を新しい曲として登録する
-app.post("/api/tracks/:id/remove-vocals", async (req, res) => {
+app.post("/api/tracks/:id/remove-vocals", (req, res) => {
   const library = loadLibrary();
   const entry = library.find((t) => t.id === req.params.id);
   if (!entry) {
@@ -302,26 +385,43 @@ app.post("/api/tracks/:id/remove-vocals", async (req, res) => {
   }
 
   const newId = uuidv4();
-  try {
-    const filename = await removeVocals(sourcePath, newId);
-    const newEntry = {
-      id: newId,
-      filename,
-      title: `${entry.title} (Instrumental)`,
-      displayTitle: `${entry.displayTitle} (Instrumental)`,
-      author: entry.author,
-      arranged: true,
-      note: ["AIボーカル除去 (Demucs)", entry.note].filter(Boolean).join(" / "),
-      sourceTrackId: entry.id,
-      createdAt: new Date().toISOString(),
-    };
-    const current = loadLibrary();
-    current.push(newEntry);
-    saveLibrary(current);
-    res.status(201).json(newEntry);
-  } catch (e) {
-    res.status(502).json({ error: `ボーカル除去に失敗しました: ${String(e.message || e)}` });
+  const jobId = createJob();
+  res.status(202).json({ jobId });
+
+  removeVocals(sourcePath, newId, (progress) => {
+    const job = jobs.get(jobId);
+    if (job) job.progress = progress;
+  })
+    .then((filename) => {
+      const newEntry = {
+        id: newId,
+        filename,
+        title: `${entry.title} (Instrumental)`,
+        displayTitle: `${entry.displayTitle} (Instrumental)`,
+        author: entry.author,
+        arranged: true,
+        note: ["AIボーカル除去 (Demucs)", entry.note].filter(Boolean).join(" / "),
+        sourceTrackId: entry.id,
+        createdAt: new Date().toISOString(),
+      };
+      const current = loadLibrary();
+      current.push(newEntry);
+      saveLibrary(current);
+      jobs.set(jobId, { status: "done", progress: 100, result: newEntry });
+    })
+    .catch((e) => {
+      jobs.set(jobId, { status: "error", progress: 0, error: `ボーカル除去に失敗しました: ${String(e.message || e)}` });
+    });
+});
+
+// ジョブの進捗確認 (ボーカル除去・将来の非同期処理で共用)
+app.get("/api/jobs/:id", (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) {
+    res.status(404).json({ error: "not found" });
+    return;
   }
+  res.json(job);
 });
 
 // 曲メタデータ編集 (曲名/表示用曲名/作者/注記/BGM化フラグ)
@@ -388,12 +488,67 @@ app.put("/api/program", (req, res) => {
   }
   for (const item of req.body) {
     if (typeof item.name !== "string" || !item.name.trim()) {
-      res.status(400).json({ error: "各項目に name が必要です" });
+      res.status(400).json({ error: "各演目に name が必要です" });
       return;
     }
   }
   saveProgram(req.body);
   res.json(req.body);
+});
+
+// 転換用プレイリスト一覧
+app.get("/api/playlists", (req, res) => {
+  res.json(loadPlaylists());
+});
+
+// プレイリスト作成
+app.post("/api/playlists", (req, res) => {
+  const name = (req.body.name || "").trim();
+  if (!name) {
+    res.status(400).json({ error: "プレイリスト名を入力してください" });
+    return;
+  }
+  const entry = {
+    id: uuidv4(),
+    name,
+    trackIds: Array.isArray(req.body.trackIds) ? req.body.trackIds : [],
+    note: (req.body.note || "").trim(),
+  };
+  const playlists = loadPlaylists();
+  playlists.push(entry);
+  savePlaylists(playlists);
+  res.status(201).json(entry);
+});
+
+// プレイリスト編集 (名前/曲リスト/注記)
+app.patch("/api/playlists/:id", (req, res) => {
+  const playlists = loadPlaylists();
+  const entry = playlists.find((p) => p.id === req.params.id);
+  if (!entry) {
+    res.status(404).json({ error: "not found" });
+    return;
+  }
+  if (typeof req.body.name === "string" && req.body.name.trim()) entry.name = req.body.name.trim();
+  if (typeof req.body.note === "string") entry.note = req.body.note.trim();
+  if (Array.isArray(req.body.trackIds)) entry.trackIds = req.body.trackIds;
+  savePlaylists(playlists);
+  res.json(entry);
+});
+
+// プレイリスト削除 (行事の次第から参照中なら警告だけ返して削除は実行する)
+app.delete("/api/playlists/:id", (req, res) => {
+  const playlists = loadPlaylists();
+  const idx = playlists.findIndex((p) => p.id === req.params.id);
+  if (idx === -1) {
+    res.status(404).json({ error: "not found" });
+    return;
+  }
+  playlists.splice(idx, 1);
+  savePlaylists(playlists);
+
+  const program = loadProgram();
+  const stillUsed = program.some((item) => item.playlistId === req.params.id);
+  res.json({ deleted: req.params.id, warning: stillUsed ? "行事の次第から参照されたままです" : null });
 });
 
 app.listen(PORT, async () => {

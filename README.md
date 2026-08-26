@@ -3,7 +3,11 @@
 Webカメラでハンドサインを認識してBGMを操作するPythonアプリ。
 
 よく使うページへのリンクは [links.html](links.html) にまとめてあります
-(`http://127.0.0.1:8000/links.html` などで開いてください)。
+(`main.py` 実行中に `http://127.0.0.1:8787/links.html` で開いてください)。
+`main.py` のAPI/管理画面/配信画面は `0.0.0.0` で待ち受けているため、
+同じルーター(LAN)配下の他端末からも `http://(このPCのIP):8787/links.html`
+でアクセスできます。信頼できないネットワークでは注意してください
+(認証機構は無いため、同じLAN上の誰でも操作・曲情報の取得ができます)。
 
 ## セットアップ
 
@@ -92,26 +96,32 @@ python main.py --dir ./tracks --hand-sign --camera 0 --cooldown 1.0 --voice --ap
 - `--voice`: 音声コマンドを有効化
 - `--api-port`: 現在再生中の曲情報とキャリブレーション状態を提供するHTTP APIのポート (デフォルト 8787、0で無効化)
 - `--program`: 行事の次第(演目リスト)を定義したJSONファイル。指定すると `N` キーで
-  次の項目に進行できる (下記「行事の次第と連動させる」参照)
+  次の演目に進行できる (下記「行事の次第と連動させる」参照)
+- `--no-library`: bgm-library (Node.js) の自動起動をスキップする
 
 ## 行事の次第と連動させる (発表会・学芸会向け)
 
-劇や演奏など、BGMを流さずに進行する項目が混ざる行事向けの機能です。
+劇や演奏など、BGMを流さずに進行する演目が混ざる行事向けの機能です。
 
 ```bash
 python main.py --dir ./tracks --program program.json
 ```
 
-`N` キーを押すたびに次の項目へ進みます。項目にBGM(プレイリスト)が設定されて
-いれば「転換中」としてそのBGMを順番に再生し(最後まで流れたら先頭に戻って
-ループ)、もう一度 `N` を押すとBGMが止まり「上演中」に切り替わります。BGMが
-無い項目はそのまま即座に「上演中」になります。
+`N` キー(`control.html` の「次の演目へ」ボタンでも可)を押すたびに次の演目へ
+進みます。演目に転換用プレイリストが割り当てられていれば「転換中」としてその
+BGMを順番に再生し(最後まで流れたら先頭に戻ってループ)、もう一度 `N` を押すと
+BGMが止まり「上演中」に切り替わります。BGMが無い演目はそのまま即座に
+「上演中」になります。最初の演目にプレイリストが割り当てられている場合は、
+一番最初の `N` でその転換(オープニングBGM)から明示的に始まります。
 
-`--program` 指定時は `/now-playing` の内容も変わり、上演中は項目名のみ、
-転換中は次の項目名と再生中BGMを返します(詳しくは下記API表を参照)。
+`B` キー(または「戻る」ボタン)で直前の進行を1つ取り消せます。
 
-`program.json` は手で書かず、[bgm-library](#bgm-library-曲のアップロードid管理)
-アプリのUIから発表項目にライブラリの曲を割り当てて保存してください
+`--program` 指定時は `/now-playing` の内容も変わり、上演中は演目名のみ、
+転換中は次の演目名と再生中BGMを返します(詳しくは下記API表を参照)。
+
+演目とBGMの割り当ては手で書かず、[bgm-library](#bgm-library-曲のアップロードid管理)
+アプリのUIから行ってください。転換に使うBGMは名前付きの「プレイリスト」として
+作成し、各演目に付け外しする方式です(同じプレイリストを複数の演目で使い回せます)。
 (サンプル: [program.example.json](program.example.json))。
 
 ## 配信用画面 (monitor1.html / monitor2.html)
@@ -125,15 +135,11 @@ python main.py --dir ./tracks --program program.json
 python main.py --dir ./tracks
 ```
 
-を実行した状態で、`monitor1.html` と `monitor2.html` をブラウザ(またはOBSの
-Browser Source)で開いてください。`file://` で直接開くと `fetch` がブロックされる
-環境があるため、うまく表示されない場合は下記のように簡易HTTPサーバー経由で配信してください。
-
-```bash
-python -m http.server 8000
-```
-
-→ `http://127.0.0.1:8000/monitor1.html` / `monitor2.html` を開く
+を実行した状態で、`http://127.0.0.1:8787/monitor1.html` / `monitor2.html` を
+ブラウザ(またはOBSのBrowser Source)で開いてください(`monitor1.html` 等は
+`main.py` のAPIサーバー自身が配信するため、別途HTTPサーバーを立てる必要はありません)。
+`file://` で直接開くと `fetch` がブロックされる環境があるため、必ずこの
+`http://127.0.0.1:8787/...` の形式で開いてください。
 
 - 2枚のモニターの解像度・物理サイズが違っても、後述のキャリブレーションで
   文字サイズと継ぎ目位置がぴったり合うように自動計算されます。
@@ -154,7 +160,7 @@ python -m http.server 8000
 配信用の2画面(`monitor1.html` / `monitor2.html`)の位置調整パネルがあります。
 
 ```
-http://127.0.0.1:8000/control.html
+http://127.0.0.1:8787/control.html
 ```
 
 ### 配信画面の位置調整
@@ -179,12 +185,18 @@ BGMファイルをアップロードするとUUIDをファイル名にして保�
 [行事の次第](#行事の次第と連動させる-発表会・学芸会向け)への曲の割り当ても
 ここから行います。
 
+初回のみセットアップが必要です:
+
 ```bash
 cd bgm-library
 npm install
 cp .env.example .env   # 必要に応じて編集 (後述)
-npm start
 ```
+
+セットアップ後は `python main.py` を実行すると **bgm-library も自動的に一緒に
+起動します**(`node` と `bgm-library/node_modules` が存在する場合。`--no-library`
+で自動起動をスキップできます)。`main.py` を終了すると bgm-library も一緒に終了します。
+単体で起動したい場合は今まで通り `cd bgm-library && npm start` でも動きます。
 
 `http://localhost:4000` にアクセスすると管理画面が開きます。
 
@@ -202,10 +214,15 @@ npm start
 - ボーカル除去(AI): 登録済みの曲の「ボーカル除去」ボタンを押すと、
   [Demucs](https://github.com/facebookresearch/demucs) でインストゥルメンタル版を
   生成し、`(Instrumental)` 付きの新しい曲としてライブラリに追加します(元の曲は
-  そのまま残ります)。`pip install demucs`(main.py と同じvenv)が必要で、CPU実行の
-  場合は曲の長さと同程度〜数倍の処理時間がかかります。
-- 行事の次第: 発表項目を追加し、各項目にライブラリの曲をプレイリストとして
-  複数割り当てられます(`../program.json` に保存され、`main.py --program` が
+  そのまま残ります)。`pip install demucs`(main.py と同じvenv)が必要です。
+  ボタンを押すとすぐ処理が始まり、完了までボタンに進捗(%)が表示されます。
+  NVIDIA GPU(CUDA)が無い環境ではCPU実行になり、曲の長さと同程度〜数倍の
+  処理時間がかかります(CPUのマルチプロセス並列化は単一トラックではオーバー
+  ヘッドの方が大きく逆に遅くなったため採用していません)。
+- 転換用プレイリスト: 名前を付けたプレイリスト(複数曲・並べ替え可)を作成できます
+  (`../tracks/playlists.json` に保存)。同じプレイリストを複数の演目で使い回せます。
+- 行事の次第: 発表演目を追加し、各演目に転換用プレイリストを1つ選んで
+  付け外しできます(`../program.json` に保存され、`main.py --program` が
   読み込みます)。
 
 `.env` の `TRACKS_DIR` / `PROGRAM_FILE` は、`main.py` の `--dir` / `--program` と

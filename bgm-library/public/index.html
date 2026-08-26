@@ -23,14 +23,27 @@
   .spotify-results div:hover { background: #333; }
   .muted { color: #888; font-size: 12px; }
   select { padding: 4px; border-radius: 4px; background: #1b1d23; color: #eee; border: 1px solid #444; }
-  .program-item { display: flex; gap: 8px; align-items: flex-start; margin-top: 10px; padding-top: 10px; border-top: 1px solid #333; }
+  .program-item {
+    display: flex; gap: 8px; align-items: flex-start;
+    background: #20222b; border: 1px solid #383b45; border-radius: 8px;
+    padding: 14px; margin-top: 10px;
+  }
   .program-item input[type=text] { width: 220px; }
   .program-item-main { flex: 1; }
+  .program-item-main select { width: 100%; margin-top: 6px; box-sizing: border-box; }
+  .playlist-preview { margin-top: 6px; font-size: 12px; color: #9fd6a8; }
+  .playlist-preview.empty { color: #888; }
   .bgm-playlist { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
   .bgm-chip { display: flex; align-items: center; gap: 6px; background: #1b1d23; border: 1px solid #444; border-radius: 4px; padding: 3px 6px; font-size: 12px; }
   .bgm-chip .bgm-chip-title { flex: 1; }
   .bgm-chip button { margin: 0; padding: 1px 6px; font-size: 11px; }
   .bgm-add-row { display: flex; gap: 6px; margin-top: 4px; align-items: center; }
+  .playlist-card {
+    background: #20222b; border: 1px solid #383b45; border-radius: 8px;
+    padding: 14px; margin-top: 10px;
+  }
+  .playlist-card .row-inline { margin-top: 6px; }
+  .playlist-card input[type=text] { width: auto; flex: 1; }
 </style>
 </head>
 <body>
@@ -105,10 +118,17 @@
     </table>
   </div>
 
-  <h2>行事の次第 (発表項目とBGMの割り当て)</h2>
+  <h2>転換用プレイリスト</h2>
+  <div class="card">
+    <p class="muted">名前を付けたプレイリストを作っておき、下の「行事の次第」で各演目の転換に付け外しできます。同じプレイリストを複数の演目で使い回せます。</p>
+    <div id="playlist-manager-list"></div>
+    <button class="secondary" id="btn-add-playlist" type="button">プレイリストを新規作成</button>
+  </div>
+
+  <h2>行事の次第 (演目とBGMの割り当て)</h2>
   <div class="card">
     <div id="program-list"></div>
-    <button class="secondary" id="btn-add-item" type="button">項目を追加</button>
+    <button class="secondary" id="btn-add-item" type="button">演目を追加</button>
     <button id="btn-save-program" type="button">次第を保存</button>
     <span class="muted" id="program-status"></span>
   </div>
@@ -117,15 +137,23 @@
 <script>
 let library = [];
 let program = [];
+let playlists = [];
 
 async function refreshLibrary() {
   library = await fetch("/api/tracks").then(r => r.json());
   renderLibrary();
+  renderPlaylistManager();
   renderProgram();
 }
 
 async function refreshProgram() {
   program = await fetch("/api/program").then(r => r.json());
+  renderProgram();
+}
+
+async function refreshPlaylists() {
+  playlists = await fetch("/api/playlists").then(r => r.json());
+  renderPlaylistManager();
   renderProgram();
 }
 
@@ -167,7 +195,7 @@ function renderLibrary() {
     btn.addEventListener("click", async () => {
       btn.disabled = true;
       const original = btn.textContent;
-      btn.textContent = "処理中...(数十秒〜数分)";
+      btn.textContent = "開始中...";
       try {
         const res = await fetch(`/api/tracks/${btn.dataset.devocal}/remove-vocals`, { method: "POST" });
         const data = await res.json();
@@ -177,7 +205,7 @@ function renderLibrary() {
           btn.textContent = original;
           return;
         }
-        await refreshLibrary();
+        await pollVocalRemovalJob(data.jobId, btn, original);
       } catch (e) {
         alert("ボーカル除去に失敗しました");
         btn.disabled = false;
@@ -187,27 +215,55 @@ function renderLibrary() {
   });
 }
 
-function renderProgram() {
-  const container = document.getElementById("program-list");
+function pollVocalRemovalJob(jobId, btn, originalLabel) {
+  return new Promise((resolve) => {
+    const tick = async () => {
+      let job;
+      try {
+        job = await fetch(`/api/jobs/${jobId}`).then(r => r.json());
+      } catch (e) {
+        setTimeout(tick, 1500);
+        return;
+      }
+      if (job.status === "running") {
+        btn.textContent = `処理中... ${job.progress ?? 0}%`;
+        setTimeout(tick, 1000);
+        return;
+      }
+      if (job.status === "error") {
+        alert(job.error || "ボーカル除去に失敗しました");
+        btn.disabled = false;
+        btn.textContent = originalLabel;
+        resolve();
+        return;
+      }
+      // done
+      await refreshLibrary();
+      resolve();
+    };
+    tick();
+  });
+}
+
+function renderPlaylistManager() {
+  const container = document.getElementById("playlist-manager-list");
   container.innerHTML = "";
   const libraryById = Object.fromEntries(library.map(t => [t.id, t]));
 
-  program.forEach((item, i) => {
-    if (!Array.isArray(item.bgm)) item.bgm = item.bgm ? [item.bgm] : [];
+  playlists.forEach((pl, i) => {
+    const card = document.createElement("div");
+    card.className = "playlist-card";
 
-    const row = document.createElement("div");
-    row.className = "program-item";
-
-    const chips = item.bgm.map((id, ci) => {
+    const chips = (pl.trackIds || []).map((id, ci) => {
       const t = libraryById[id];
       const label = t ? escapeHtml(t.displayTitle) : `(見つかりません: ${escapeHtml(id)})`;
       return `
         <div class="bgm-chip">
           <span class="muted">${ci + 1}.</span>
           <span class="bgm-chip-title">${label}</span>
-          <button class="secondary" data-chip-up="${i}:${ci}" type="button">↑</button>
-          <button class="secondary" data-chip-down="${i}:${ci}" type="button">↓</button>
-          <button class="danger" data-chip-remove="${i}:${ci}" type="button">×</button>
+          <button class="secondary" data-pl-chip-up="${i}:${ci}" type="button">↑</button>
+          <button class="secondary" data-pl-chip-down="${i}:${ci}" type="button">↓</button>
+          <button class="danger" data-pl-chip-remove="${i}:${ci}" type="button">×</button>
         </div>`;
     }).join("");
 
@@ -215,23 +271,147 @@ function renderProgram() {
       `<option value="${t.id}">${escapeHtml(t.displayTitle)}</option>`
     ).join("");
 
+    card.innerHTML = `
+      <div class="row-inline">
+        <input type="text" value="${escapeAttr(pl.name || "")}" data-pl-idx="${i}" data-pl-field="name" placeholder="プレイリスト名 (例: 開幕BGM)" />
+        <button class="danger" data-pl-delete="${pl.id}" type="button">削除</button>
+      </div>
+      <input type="text" value="${escapeAttr(pl.note || "")}" data-pl-idx="${i}" data-pl-field="note" placeholder="注記 (任意。例: 演目1→2の転換用)" style="margin-top:6px;" />
+      <div class="bgm-playlist">
+        ${chips || '<span class="muted">(曲が未登録です)</span>'}
+      </div>
+      <div class="bgm-add-row">
+        <select data-pl-add-track="${i}">
+          <option value="">+ 曲を追加...</option>
+          ${availableOptions}
+        </select>
+      </div>
+    `;
+    container.appendChild(card);
+  });
+
+  container.querySelectorAll("input[data-pl-field]").forEach(el => {
+    el.addEventListener("change", async () => {
+      const idx = Number(el.dataset.plIdx), field = el.dataset.plField;
+      await fetch(`/api/playlists/${playlists[idx].id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ [field]: el.value }),
+      });
+      await refreshPlaylists();
+    });
+  });
+  container.querySelectorAll("select[data-pl-add-track]").forEach(el => {
+    el.addEventListener("change", async () => {
+      if (!el.value) return;
+      const pl = playlists[Number(el.dataset.plAddTrack)];
+      await savePlaylistTracks(pl.id, [...(pl.trackIds || []), el.value]);
+    });
+  });
+  container.querySelectorAll("button[data-pl-chip-remove]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const [i, ci] = btn.dataset.plChipRemove.split(":").map(Number);
+      const trackIds = [...playlists[i].trackIds];
+      trackIds.splice(ci, 1);
+      await savePlaylistTracks(playlists[i].id, trackIds);
+    });
+  });
+  container.querySelectorAll("button[data-pl-chip-up]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const [i, ci] = btn.dataset.plChipUp.split(":").map(Number);
+      if (ci === 0) return;
+      const trackIds = [...playlists[i].trackIds];
+      [trackIds[ci - 1], trackIds[ci]] = [trackIds[ci], trackIds[ci - 1]];
+      await savePlaylistTracks(playlists[i].id, trackIds);
+    });
+  });
+  container.querySelectorAll("button[data-pl-chip-down]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const [i, ci] = btn.dataset.plChipDown.split(":").map(Number);
+      const trackIds = [...playlists[i].trackIds];
+      if (ci >= trackIds.length - 1) return;
+      [trackIds[ci + 1], trackIds[ci]] = [trackIds[ci], trackIds[ci + 1]];
+      await savePlaylistTracks(playlists[i].id, trackIds);
+    });
+  });
+  container.querySelectorAll("button[data-pl-delete]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      if (!confirm("このプレイリストを削除しますか?")) return;
+      const r = await fetch(`/api/playlists/${btn.dataset.plDelete}`, { method: "DELETE" }).then(r => r.json());
+      if (r.warning) alert(r.warning);
+      await refreshPlaylists();
+    });
+  });
+}
+
+async function savePlaylistTracks(id, trackIds) {
+  await fetch(`/api/playlists/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ trackIds }),
+  });
+  await refreshPlaylists();
+}
+
+document.getElementById("btn-add-playlist").addEventListener("click", async () => {
+  const name = prompt("プレイリスト名を入力してください", "");
+  if (!name || !name.trim()) return;
+  await fetch("/api/playlists", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: name.trim(), trackIds: [] }),
+  });
+  await refreshPlaylists();
+});
+
+function renderProgram() {
+  const container = document.getElementById("program-list");
+  container.innerHTML = "";
+  const playlistById = Object.fromEntries(playlists.map(p => [p.id, p]));
+  const libraryById = Object.fromEntries(library.map(t => [t.id, t]));
+
+  program.forEach((item, i) => {
+    const row = document.createElement("div");
+    row.className = "program-item";
+
+    const playlistOptions = playlists.map(p =>
+      `<option value="${p.id}" ${item.playlistId === p.id ? "selected" : ""}>${escapeHtml(p.name)}</option>`
+    ).join("");
+
+    let previewHtml;
+    const selectedPlaylist = item.playlistId ? playlistById[item.playlistId] : null;
+    const legacyBgm = !item.playlistId && item.bgm
+      ? (Array.isArray(item.bgm) ? item.bgm : [item.bgm])
+      : [];
+    if (selectedPlaylist) {
+      const titles = (selectedPlaylist.trackIds || [])
+        .map(id => (libraryById[id] ? escapeHtml(libraryById[id].displayTitle) : "(見つかりません)"))
+        .join(" → ");
+      previewHtml = `<div class="playlist-preview">${titles || "(このプレイリストは空です)"}</div>`;
+    } else if (item.playlistId) {
+      previewHtml = `<div class="playlist-preview empty">(プレイリストが見つかりません: ${escapeHtml(item.playlistId)})</div>`;
+    } else if (legacyBgm.length) {
+      const titles = legacyBgm
+        .map(id => (libraryById[id] ? escapeHtml(libraryById[id].displayTitle) : "(見つかりません)"))
+        .join(" → ");
+      previewHtml = `<div class="playlist-preview">(旧形式の直接指定) ${titles}</div>`;
+    } else {
+      previewHtml = `<div class="playlist-preview empty">(BGMなし・上演中扱い)</div>`;
+    }
+
     row.innerHTML = `
       <span class="muted">#${i + 1}</span>
       <div class="program-item-main">
-        <input type="text" value="${escapeAttr(item.name || "")}" data-idx="${i}" data-field="name" placeholder="項目名 (例: 劇『桃太郎』)" />
-        <div class="bgm-playlist">
-          ${chips || '<span class="muted">(BGMなし・上演中扱い)</span>'}
-        </div>
-        <div class="bgm-add-row">
-          <select data-add-bgm="${i}">
-            <option value="">+ BGMをプレイリストに追加...</option>
-            ${availableOptions}
-          </select>
-        </div>
+        <input type="text" value="${escapeAttr(item.name || "")}" data-idx="${i}" data-field="name" placeholder="演目名 (例: 劇『桃太郎』)" />
+        <select data-idx="${i}" data-field="playlistId">
+          <option value="">(BGMなし)</option>
+          ${playlistOptions}
+        </select>
+        ${previewHtml}
       </div>
       <button class="secondary" data-up="${i}" type="button">↑</button>
       <button class="secondary" data-down="${i}" type="button">↓</button>
-      <button class="danger" data-remove="${i}" type="button">項目削除</button>
+      <button class="danger" data-remove="${i}" type="button">演目削除</button>
     `;
     container.appendChild(row);
   });
@@ -242,32 +422,11 @@ function renderProgram() {
       program[idx][field] = el.value;
     });
   });
-  container.querySelectorAll("select[data-add-bgm]").forEach(el => {
+  container.querySelectorAll("select[data-field]").forEach(el => {
     el.addEventListener("change", () => {
-      if (!el.value) return;
-      const idx = Number(el.dataset.addBgm);
-      program[idx].bgm.push(el.value);
+      const idx = Number(el.dataset.idx), field = el.dataset.field;
+      program[idx][field] = el.value || null;
       renderProgram();
-    });
-  });
-  container.querySelectorAll("button[data-chip-remove]").forEach(btn => {
-    btn.addEventListener("click", () => {
-      const [i, ci] = btn.dataset.chipRemove.split(":").map(Number);
-      program[i].bgm.splice(ci, 1);
-      renderProgram();
-    });
-  });
-  container.querySelectorAll("button[data-chip-up]").forEach(btn => {
-    btn.addEventListener("click", () => {
-      const [i, ci] = btn.dataset.chipUp.split(":").map(Number);
-      if (ci > 0) { const l = program[i].bgm; [l[ci - 1], l[ci]] = [l[ci], l[ci - 1]]; renderProgram(); }
-    });
-  });
-  container.querySelectorAll("button[data-chip-down]").forEach(btn => {
-    btn.addEventListener("click", () => {
-      const [i, ci] = btn.dataset.chipDown.split(":").map(Number);
-      const l = program[i].bgm;
-      if (ci < l.length - 1) { [l[ci + 1], l[ci]] = [l[ci], l[ci + 1]]; renderProgram(); }
     });
   });
   container.querySelectorAll("button[data-remove]").forEach(btn => {
@@ -288,7 +447,7 @@ function renderProgram() {
 }
 
 document.getElementById("btn-add-item").addEventListener("click", () => {
-  program.push({ name: "", bgm: [] });
+  program.push({ name: "", playlistId: null });
   renderProgram();
 });
 
@@ -405,7 +564,11 @@ function escapeHtml(s) {
 }
 function escapeAttr(s) { return escapeHtml(s); }
 
-refreshLibrary();
+(async () => {
+  await refreshLibrary();
+  await refreshPlaylists();
+  await refreshProgram();
+})();
 </script>
 </body>
 </html>
