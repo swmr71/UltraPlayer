@@ -217,11 +217,23 @@ function createJob() {
 // 採用していない。代わりにDemucsの進捗バー(標準エラー出力)を正規表現でパース
 // してジョブの進捗(0-99%)に反映している。
 //
+// htdemucs_ft は4モデルのアンサンブル(bag of models)で、Demucsはモデルごとに
+// 0%→100%の進捗バーを別々に出す。そのため単純に最後に見つけたパーセントだけを
+// 使うと「100%まで行ってはまた0%に戻る」を4回繰り返すように見える(連打などの
+// せいではない)。ここでは大きく数値が下がったら次のモデルに進んだとみなして
+// パス数で割り、常に単調増加する全体進捗に変換している。
+//
 // タイムアウトは合計時間の固定上限ではなく「無操作(標準エラー出力が一定時間
 // 止まった)」方式にしている。長い曲やCPUが遅い環境でも、進捗が出続けている
 // 限り処理を継続でき、本当にハングした場合だけ中断する。
 // ------------------------------------------------------------
 const DEMUCS_INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000;
+
+// モデルごとの内部パス数 (htdemucs_ft は4モデルのbag、それ以外は単一モデル)
+const DEMUCS_MODEL_PASSES = { htdemucs_ft: 4 };
+function demucsPassCount(model) {
+  return DEMUCS_MODEL_PASSES[model] || 1;
+}
 
 function runDemucs(sourcePath, workDir, onProgress) {
   return new Promise((resolve, reject) => {
@@ -253,13 +265,24 @@ function runDemucs(sourcePath, workDir, onProgress) {
     };
     resetTimer();
 
+    const totalPasses = demucsPassCount(DEMUCS_MODEL);
+    let passIndex = 0;
+    let lastPercent = 0;
+
     child.stderr.on("data", (chunk) => {
       resetTimer();
       stderrTail += chunk.toString();
       if (stderrTail.length > 4000) stderrTail = stderrTail.slice(-4000);
       const matches = [...stderrTail.matchAll(/(\d+(?:\.\d+)?)%\|/g)];
       if (matches.length) {
-        onProgress(Math.min(99, Math.round(parseFloat(matches[matches.length - 1][1]))));
+        const percent = parseFloat(matches[matches.length - 1][1]);
+        // 大きく数値が下がったら次のモデルのパスに入ったとみなす
+        if (percent < lastPercent - 20 && passIndex < totalPasses - 1) {
+          passIndex += 1;
+        }
+        lastPercent = percent;
+        const overall = (passIndex * 100 + percent) / totalPasses;
+        onProgress(Math.min(99, Math.round(overall)));
       }
     });
 
