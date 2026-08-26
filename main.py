@@ -37,7 +37,7 @@ Webカメラでハンドサインを認識してBGMを操作するプレイヤ�
         cd bgm-library
         npm install
         npm start
-    で http://localhost:4000 が起動し、曲のアップロード・作者/伏字タイトルの
+    で http://127.0.0.1:4000 が起動し、曲のアップロード・作者/伏字タイトルの
     編集・行事の次第への割り当てができる (TRACKS_DIR/PROGRAM_FILE を
     main.py の --dir / --program と同じ場所に向けておくこと)。
 """
@@ -1065,7 +1065,7 @@ def start_bgm_library(tracks_dir: str, program_file: str | None):
 
     try:
         proc = subprocess.Popen([node_cmd, "server.js"], cwd=BGM_LIBRARY_DIR, env=env)
-        print("[bgm-library] 自動起動しました (http://localhost:4000)")
+        print("[bgm-library] 自動起動しました (http://127.0.0.1:4000)")
         return proc
     except Exception as e:
         print(f"[警告] bgm-library を自動起動できませんでした: {e}")

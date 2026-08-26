@@ -597,7 +597,7 @@ app.delete("/api/playlists/:id", (req, res) => {
 });
 
 async function onServerReady() {
-  console.log(`[bgm-library] http://localhost:${PORT} で起動しました`);
+  console.log(`[bgm-library] http://127.0.0.1:${PORT} で起動しました`);
   console.log(`[bgm-library] 音源保存先: ${TRACKS_DIR}`);
   console.log(`[bgm-library] 次第ファイル: ${PROGRAM_FILE}`);
   if (!LASTFM_API_KEY) {

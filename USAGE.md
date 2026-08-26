@@ -72,7 +72,7 @@ Web管理画面から操作できるシステム。このファイルは全機�
    `http://127.0.0.1:8787/...` の形式で開くこと。
 
    `node` と `bgm-library/node_modules` が揃っていれば、**bgm-libraryもこの時に
-   自動で一緒に起動する**(`http://localhost:4000`)。自動起動したくない場合は
+   自動で一緒に起動する**(`http://127.0.0.1:4000`)。自動起動したくない場合は
    `--no-library` を付ける。bgm-library だけ単体で起動したい場合は今まで通り
    `cd bgm-library && npm start` でも動く。
 
@@ -102,7 +102,7 @@ python main.py --dir ./tracks --hand-sign --camera 0 --cooldown 1.0 --voice --ap
 
 ## BGMライブラリ管理 (bgm-library)
 
-`http://localhost:4000` で開く管理画面。曲は `tracks/tracks.json` に
+`http://127.0.0.1:4000` で開く管理画面。曲は `tracks/tracks.json` に
 `{id, filename, title, displayTitle, author, arranged, note, sourceUrl?, sourceTrackId?}`
 の形で記録され、実ファイルは `tracks/<id>.mp3` として保存される。
 
@@ -304,7 +304,7 @@ CORSヘッダー付き(ブラウザ/OBSから直接fetch可能)。
 
 ## bgm-library API リファレンス
 
-ベースURL: `http://localhost:4000` (`.env` の `PORT` で変更可)。
+ベースURL: `http://127.0.0.1:4000` (`.env` の `PORT` で変更可)。
 
 | メソッド | パス | 内容 |
 |---|---|---|
