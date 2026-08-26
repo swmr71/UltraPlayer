@@ -45,6 +45,8 @@
   }
   .playlist-card .row-inline { margin-top: 6px; }
   .playlist-card input[type=text] { width: auto; flex: 1; }
+  .pl-loop-label { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 12px; color: #aaa; }
+  .pl-loop-label input[type=checkbox] { width: auto; }
   button.preview-play { background: #2f8f5b; margin-top: 0; padding: 4px 10px; min-width: 34px; }
   button.preview-play.playing { background: #b3453f; }
   tr.track-child-row { background: #20222b; }
@@ -379,6 +381,10 @@ function renderPlaylistManager() {
         <button class="danger" data-pl-delete="${pl.id}" type="button">削除</button>
       </div>
       <input type="text" value="${escapeAttr(pl.note || "")}" data-pl-idx="${i}" data-pl-field="note" placeholder="注記 (任意。例: 演目1→2の転換用)" style="margin-top:6px;" />
+      <label class="pl-loop-label">
+        <input type="checkbox" data-pl-idx="${i}" data-pl-loop ${pl.loop === false ? "" : "checked"} />
+        最後まで流れたら繰り返す(オフだと1回流れたら無音のまま止まります)
+      </label>
       <div class="bgm-playlist">
         ${chips || '<span class="muted">(曲が未登録です)</span>'}
       </div>
@@ -399,6 +405,17 @@ function renderPlaylistManager() {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ [field]: el.value }),
+      });
+      await refreshPlaylists();
+    });
+  });
+  container.querySelectorAll("input[data-pl-loop]").forEach(el => {
+    el.addEventListener("change", async () => {
+      const idx = Number(el.dataset.plIdx);
+      await fetch(`/api/playlists/${playlists[idx].id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ loop: el.checked }),
       });
       await refreshPlaylists();
     });

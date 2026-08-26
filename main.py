@@ -522,7 +522,9 @@ class BGMPlayer:
 # ------------------------------------------------------------
 def load_playlists(track_dir: str) -> dict:
     """tracks/playlists.json (bgm-library で作成する名前付き転換用プレイリスト) を
-    id -> 曲idリスト の辞書として読み込む。ファイルが無ければ空辞書を返す。
+    id -> {"trackIds": [...], "loop": bool} の辞書として読み込む。
+    "loop" は最後まで流れたら先頭に戻ってループするか(既定True、bgm-libraryの
+    チェックボックスで曲ごとにOFFにできる)。ファイルが無ければ空辞書を返す。
     """
     path = os.path.join(track_dir, "playlists.json")
     if not os.path.isfile(path):
@@ -530,7 +532,10 @@ def load_playlists(track_dir: str) -> dict:
     try:
         with open(path, "r", encoding="utf-8") as f:
             entries = json.load(f)
-        return {p["id"]: p.get("trackIds", []) for p in entries}
+        return {
+            p["id"]: {"trackIds": p.get("trackIds", []), "loop": p.get("loop", True)}
+            for p in entries
+        }
     except Exception as e:
         print(f"[警告] playlists.jsonの読み込みに失敗しました: {e}")
         return {}
@@ -583,6 +588,7 @@ class ProgramController:
         self.bgm_queue = []
         self.bgm_pos = 0
         self.active_playlist_id = None  # 現在bgm_queueの元になっているプレイリストid
+        self.active_playlist_loops = True  # 現在のbgm_queueが最後まで行ったらループするか
         self._history = []  # advance()前のスナップショットのスタック (戻る用)
         # 同じプレイリストを複数の演目(転換用・上演中用問わず)で使い回したとき、
         # 毎回1曲目からではなく前回流れ終わった曲の次から再生されるようにするための
@@ -593,7 +599,7 @@ class ProgramController:
         """転換時に流すBGM(曲idリスト)"""
         playlist_id = item.get("playlistId")
         if playlist_id:
-            return list(self.playlists.get(playlist_id, []))
+            return list(self.playlists.get(playlist_id, {}).get("trackIds", []))
         bgm = item.get("bgm") or []  # 後方互換 (インライン指定)
         if isinstance(bgm, str):
             bgm = [bgm]
@@ -603,8 +609,16 @@ class ProgramController:
         """上演中ずっと流すBGM(曲idリスト)"""
         playlist_id = item.get("performingPlaylistId")
         if playlist_id:
-            return list(self.playlists.get(playlist_id, []))
+            return list(self.playlists.get(playlist_id, {}).get("trackIds", []))
         return []
+
+    def _playlist_loops(self, playlist_id) -> bool:
+        """指定プレイリストが最後まで流れたら先頭に戻ってループするか。
+        プレイリスト未指定(旧形式のインライン指定含む)は常にTrue(従来通り)。
+        """
+        if not playlist_id:
+            return True
+        return self.playlists.get(playlist_id, {}).get("loop", True)
 
     def _snapshot(self) -> dict:
         return {
@@ -615,6 +629,7 @@ class ProgramController:
             "bgm_queue": list(self.bgm_queue),
             "bgm_pos": self.bgm_pos,
             "active_playlist_id": self.active_playlist_id,
+            "active_playlist_loops": self.active_playlist_loops,
             "playlist_positions": dict(self.playlist_positions),
         }
 
@@ -626,6 +641,7 @@ class ProgramController:
         self.bgm_queue = snap["bgm_queue"]
         self.bgm_pos = snap["bgm_pos"]
         self.active_playlist_id = snap["active_playlist_id"]
+        self.active_playlist_loops = snap.get("active_playlist_loops", True)
         self.playlist_positions = snap["playlist_positions"]
 
     def _record_resume_position(self):
@@ -638,6 +654,7 @@ class ProgramController:
         self.bgm_queue = track_ids
         self.bgm_pos = self.playlist_positions.get(playlist_id, 0) % len(track_ids) if playlist_id else 0
         self.active_playlist_id = playlist_id
+        self.active_playlist_loops = self._playlist_loops(playlist_id)
         if not self.player.play_by_id(self.bgm_queue[self.bgm_pos]):
             print(f"[警告] ライブラリに該当曲が見つかりません (id={self.bgm_queue[self.bgm_pos]})")
 
@@ -723,18 +740,26 @@ class ProgramController:
         self.bgm_queue = []
         self.bgm_pos = 0
         self.active_playlist_id = None
+        self.active_playlist_loops = True
         self._history = []
         self.playlist_positions = {}
         return "[PROGRAM] 開始前の状態にリセットしました"
 
     def tick(self):
         """再生中のBGM(転換用・上演中用どちらも)が最後まで再生し終わったら
-        次の曲へ自動的に進める。末尾まで行ったら先頭に戻ってループする。
-        メインループから毎フレーム呼び出す想定。
+        次の曲へ自動的に進める。末尾まで行ったら先頭に戻ってループする
+        (プレイリストの「ループ」設定がOFFなら、最後まで行ったところで
+        無音のまま止める)。メインループから毎フレーム呼び出す想定。
         """
         if not self.bgm_queue:
             return
         if pygame.mixer.music.get_busy():
+            return
+        if not self.active_playlist_loops and self.bgm_pos + 1 >= len(self.bgm_queue):
+            self.player.stop()
+            self.bgm_queue = []
+            self.bgm_pos = 0
+            self.active_playlist_id = None
             return
         self.bgm_pos = (self.bgm_pos + 1) % len(self.bgm_queue)
         self.player.play_by_id(self.bgm_queue[self.bgm_pos])

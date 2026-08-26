@@ -591,6 +591,7 @@ app.post("/api/playlists", (req, res) => {
     name,
     trackIds: Array.isArray(req.body.trackIds) ? req.body.trackIds : [],
     note: (req.body.note || "").trim(),
+    loop: req.body.loop !== false, // 既定でループする(従来通り)。false明示時だけOFF
   };
   const playlists = loadPlaylists();
   playlists.push(entry);
@@ -609,6 +610,7 @@ app.patch("/api/playlists/:id", (req, res) => {
   if (typeof req.body.name === "string" && req.body.name.trim()) entry.name = req.body.name.trim();
   if (typeof req.body.note === "string") entry.note = req.body.note.trim();
   if (Array.isArray(req.body.trackIds)) entry.trackIds = req.body.trackIds;
+  if (typeof req.body.loop === "boolean") entry.loop = req.body.loop;
   savePlaylists(playlists);
   res.json(entry);
 });
