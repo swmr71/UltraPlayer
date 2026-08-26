@@ -465,7 +465,9 @@ app.post("/api/tracks/:id/remove-vocals", (req, res) => {
         id: newId,
         filename,
         title: `${entry.title} (Instrumental)`,
-        displayTitle: `${entry.displayTitle} (Instrumental)`,
+        // displayTitle(配信画面での表示名)は原曲と揃えたままにする。
+        // 舞台上では「ボーカル除去済みに差し替えた」と観客に分からせたくないため。
+        displayTitle: entry.displayTitle,
         author: entry.author,
         arranged: true,
         note: ["AIボーカル除去 (Demucs)", entry.note].filter(Boolean).join(" / "),

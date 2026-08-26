@@ -47,6 +47,10 @@
   .playlist-card input[type=text] { width: auto; flex: 1; }
   button.preview-play { background: #2f8f5b; margin-top: 0; padding: 4px 10px; min-width: 34px; }
   button.preview-play.playing { background: #b3453f; }
+  tr.track-child-row { background: #20222b; }
+  tr.track-child-row td { border-bottom-color: #2c2f38; }
+  tr.track-child-row + tr:not(.track-child-row) td { border-top: 2px solid #383b45; }
+  .child-indicator { font-size: 11px; color: #7de1ff; margin-bottom: 2px; padding-left: 14px; }
 </style>
 </head>
 <body>
@@ -210,11 +214,35 @@ async function refreshPlaylists() {
 function renderLibrary() {
   const body = document.getElementById("library-body");
   body.innerHTML = "";
+
+  // ボーカル除去で生成された曲(sourceTrackIdを持つ)は、元曲の直下にぶら下げて
+  // 親子関係が見えるように並べる(元曲が削除済みなら通常の曲として扱う)。
+  const byId = Object.fromEntries(library.map(t => [t.id, t]));
+  const childrenOf = {};
   for (const t of library) {
+    if (t.sourceTrackId && byId[t.sourceTrackId]) {
+      (childrenOf[t.sourceTrackId] = childrenOf[t.sourceTrackId] || []).push(t);
+    }
+  }
+  const childIds = new Set(Object.values(childrenOf).flat().map(t => t.id));
+  const ordered = [];
+  for (const t of library) {
+    if (childIds.has(t.id)) continue;
+    ordered.push({ track: t, isChild: false });
+    for (const child of (childrenOf[t.id] || [])) {
+      ordered.push({ track: child, isChild: true });
+    }
+  }
+
+  for (const { track: t, isChild } of ordered) {
     const tr = document.createElement("tr");
+    if (isChild) tr.className = "track-child-row";
     tr.innerHTML = `
       <td><button class="preview-play" data-preview="${t.id}" type="button" title="試し聞き">▶</button></td>
-      <td><input type="text" value="${escapeAttr(t.displayTitle)}" data-field="displayTitle" data-id="${t.id}" /></td>
+      <td>
+        ${isChild ? '<div class="child-indicator">↳ 改変済み</div>' : ''}
+        <input type="text" value="${escapeAttr(t.displayTitle)}" data-field="displayTitle" data-id="${t.id}" />
+      </td>
       <td><input type="text" value="${escapeAttr(t.title)}" data-field="title" data-id="${t.id}" /></td>
       <td><input type="text" value="${escapeAttr(t.author)}" data-field="author" data-id="${t.id}" /></td>
       <td>${t.arranged ? '<span class="badge">BGM化</span> ' : ''}<input type="text" value="${escapeAttr(t.note)}" data-field="note" data-id="${t.id}" /></td>
