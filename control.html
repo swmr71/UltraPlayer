@@ -408,9 +408,14 @@ function renderProgram(program) {
     programSub.textContent = `再生中BGM: ${program.bgm.title}${author}`;
     programAdvanceBtn.textContent = "次の演目へ (N)";
   } else {
-    programMode.textContent = "上演中";
+    programMode.textContent = program.bgm ? "上演中 (BGMあり)" : "上演中";
     programItem.textContent = program.current_item;
-    programSub.textContent = `${program.current_idx + 1} / ${program.total_items} 演目`;
+    if (program.bgm) {
+      const author = program.bgm.author ? ` / ${program.bgm.author}` : "";
+      programSub.textContent = `${program.current_idx + 1} / ${program.total_items} 演目 - 再生中BGM: ${program.bgm.title}${author}`;
+    } else {
+      programSub.textContent = `${program.current_idx + 1} / ${program.total_items} 演目`;
+    }
     programAdvanceBtn.textContent = "次の演目へ (N)";
   }
 }

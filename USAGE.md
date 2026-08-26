@@ -142,8 +142,11 @@ last.fm APIキーは https://www.lastfm.jp/api/account/create で無料取得で
 劇や演奏など、BGMを流さずに進行する演目が混ざる行事(発表会・学芸会)向けの機能。
 `bgm-library` の管理画面の「行事の次第」セクションで編集し、`program.json` に保存される。
 
-- 演目を追加し、各演目のドロップダウンから**転換用プレイリストを1つ選んで付け外し**できる
-  (プレイリストを選ばなければBGMなしの演目になる)
+- 演目を追加し、各演目のドロップダウンから2種類のプレイリストをそれぞれ選んで付け外しできる
+  - **転換に使うプレイリスト**: その演目に「入るとき」(転換中)に流すBGM
+  - **上演中に流すプレイリスト**: その演目が「上演中」の間ずっと流すBGM
+    (劇の劇伴・演奏中のBGMなど)
+  - どちらも選ばなければ完全にBGMなしの演目になる
 - 選んだプレイリストの中身(曲順)はプレビュー表示される。編集は「転換用プレイリスト」
   セクション側で行う
 
@@ -151,31 +154,35 @@ last.fm APIキーは https://www.lastfm.jp/api/account/create で無料取得で
 「次の演目へ」ボタン、または `POST /program/advance`)で進行できる。`B` キー
 (または「戻る」ボタン、`POST /program/back`)で直前の操作を1つ取り消せる。
 
-- **開始前 → 進める**: 演目1にプレイリストが割り当てられていれば、まずその
-  転換(BGM再生)から明示的に始まる。割り当てが無ければ演目1がBGMなしで
-  いきなり始まる(どちらで始まるかは事前に管理画面・配信画面に表示される)
-- **上演中 → 次の演目にBGMがある**: そのプレイリストを再生開始し「転換中」になる。
+- **開始前 → 進める**: 演目1に転換用プレイリストが割り当てられていれば、まずその
+  転換(BGM再生)から明示的に始まる。割り当てが無ければ演目1がいきなり
+  「上演中」になる(どちらで始まるかは事前に管理画面・配信画面に表示される)
+- **上演中 → 次の演目に転換用BGMがある**: そのプレイリストを再生開始し「転換中」になる。
   最後の曲まで流れたら自動的に先頭に戻ってループする(無音にならない)
-- **転換中 → もう一度進める**: BGMを停止し、次の演目の「上演中」になる
-- **上演中 → 次の演目にBGMがない**: 即座にその演目の「上演中」になる
+- **転換中 → もう一度進める**: 転換用BGMを止め、次の演目の「上演中」になる。この演目に
+  上演中プレイリストが割り当てられていれば、切り替わった瞬間からそのBGMが流れ始め、
+  こちらも自動でループする(無ければBGMなしの上演中になる)
+- **上演中 → 次の演目に転換用BGMがない**: 即座にその演目の「上演中」になる
 - **最後の演目で進める**: 「次第は最後の演目です」と表示され、状態は変化しない
 - **戻る**: 直前に「進める」で行った変化を1つ取り消す(転換中なら1つ前の上演中に、
   上演中ならその転換中に、というように逆順にたどれる。開始前まで戻ると
-  それ以上は戻れない)
+  それ以上は戻れない。上演中BGMが流れていた場合はそのBGMも一緒に止まる)
 
 `/now-playing` API のレスポンス形式もこの状態に応じて変わる(後述のAPIリファレンス参照)。
 
 ### 同じプレイリストを使い回したときの再生位置
 
-同じ転換用プレイリストを複数の演目で使っている場合、2回目以降は毎回1曲目からでは
-なく、前回その転換で流れ終わった曲の次の曲から再生される(最後まで行けば先頭に
-戻る)。`戻る` で巻き戻すと、この再開位置も一緒に元に戻る。
+同じプレイリスト(転換用・上演中用どちらも)を複数の演目で使っている場合、
+2回目以降は毎回1曲目からではなく、前回そのプレイリストで流れ終わった曲の
+次の曲から再生される(最後まで行けば先頭に戻る)。`戻る` で巻き戻すと、
+この再開位置も一緒に元に戻る。
 
 ### 今どの曲が流せるかを明示
 
 `control.html` の次第カードには、今の状態で実際に流れる(流れている)プレイリストが
-表示される。転換中なら「再生中のプレイリスト」として現在再生中の曲を強調表示し、
-開始前/上演中なら「次に進めると流れるプレイリスト」としてこの後 `N` を押したときに
+表示される。BGMが実際に再生中(転換中、または上演中プレイリストが割り当てられた
+演目の上演中)なら「再生中のプレイリスト」として現在再生中の曲を強調表示し、
+何も流れていなければ「次に進めると流れるプレイリスト」としてこの後 `N` を押したときに
 流れる予定の曲を先に確認できる。
 
 ### 後方互換
@@ -274,7 +281,7 @@ CORSヘッダー付き(ブラウザ/OBSから直接fetch可能)。
 
 | メソッド | パス | 内容 |
 |---|---|---|
-| `GET` | `/now-playing` | 配信画面向け。`--program` 未使用時は `{track: {title, author, arranged, note?}, playing, volume, index, total_tracks, repeat, restricted, restricted_active, tracks}`。使用時は開始前なら `{mode: "ready", starts_with: "transition"\|"performing", next_item}`、上演中なら `{mode: "performing", current_item}`、転換中なら `{mode: "transition", next_item, bgm: {title, author, arranged, note?}}` |
+| `GET` | `/now-playing` | 配信画面向け。`--program` 未使用時は `{track: {title, author, arranged, note?}, playing, volume, index, total_tracks, repeat, restricted, restricted_active, tracks}`。使用時は開始前なら `{mode: "ready", starts_with: "transition"\|"performing", next_item}`、上演中なら `{mode: "performing", current_item, bgm?: {title, author, arranged, note?}}`(上演中プレイリストがある演目のみ `bgm` を含む)、転換中なら `{mode: "transition", next_item, bgm: {title, author, arranged, note?}}` |
 | `GET` | `/admin/status` | 管理画面向け。`{player: <player.status()と同じ>, program: <programがあればadmin_status()、なければnull>}`。`program.admin_status()` は `status()` に `started`, `can_go_back`, `current_idx`, `total_items`, `items`(演目名一覧)を追加したもの。さらに転換中は `current_playlist`(`{id,title,author}` の配列)と `current_playlist_index`、それ以外は `upcoming_playlist`(次に進めると流れる予定のプレイリスト)を含む |
 | `POST` | `/command` | 再生操作。Body: `{"command": "PLAY_PAUSE"\|"STOP"\|"NEXT"\|"PREV"\|"VOL_UP"\|"VOL_DOWN"\|"REPEAT_TOGGLE"\|"RESTRICT_TOGGLE"}`。202で受理、内部のコマンドキューに積まれメインループで実行される |
 | `POST` | `/program/advance` | 次第を次の演目へ進める(`--program` 未指定時は400) |
@@ -302,7 +309,7 @@ CORSヘッダー付き(ブラウザ/OBSから直接fetch可能)。
 | `PATCH` | `/api/playlists/:id` | プレイリスト編集 (`name`/`trackIds`/`note` の一部) |
 | `DELETE` | `/api/playlists/:id` | プレイリストを削除。行事の次第から参照中なら `warning` を返す |
 | `GET` | `/api/program` | 行事の次第を取得 |
-| `PUT` | `/api/program` | 行事の次第を保存。Body: `[{name, playlistId: プレイリストid\|null}, ...]` の配列 |
+| `PUT` | `/api/program` | 行事の次第を保存。Body: `[{name, playlistId: 転換用プレイリストid\|null, performingPlaylistId: 上演中用プレイリストid\|null}, ...]` の配列 |
 
 ## トラブルシューティング
 

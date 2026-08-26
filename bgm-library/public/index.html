@@ -33,6 +33,7 @@
   .program-item-main select { width: 100%; margin-top: 6px; box-sizing: border-box; }
   .playlist-preview { margin-top: 6px; font-size: 12px; color: #9fd6a8; }
   .playlist-preview.empty { color: #888; }
+  .playlist-picker-label { display: block; font-size: 11px; color: #888; margin-top: 10px; letter-spacing: 0.02em; }
   .bgm-playlist { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
   .bgm-chip { display: flex; align-items: center; gap: 6px; background: #1b1d23; border: 1px solid #444; border-radius: 4px; padding: 3px 6px; font-size: 12px; }
   .bgm-chip .bgm-chip-title { flex: 1; }
@@ -364,6 +365,38 @@ document.getElementById("btn-add-playlist").addEventListener("click", async () =
   await refreshPlaylists();
 });
 
+function renderPlaylistPicker(item, idx, field, playlistById, libraryById, legacyIds) {
+  const options = playlists.map(p =>
+    `<option value="${p.id}" ${item[field] === p.id ? "selected" : ""}>${escapeHtml(p.name)}</option>`
+  ).join("");
+
+  let previewHtml;
+  const selected = item[field] ? playlistById[item[field]] : null;
+  if (selected) {
+    const titles = (selected.trackIds || [])
+      .map(id => (libraryById[id] ? escapeHtml(libraryById[id].displayTitle) : "(見つかりません)"))
+      .join(" → ");
+    previewHtml = `<div class="playlist-preview">${titles || "(このプレイリストは空です)"}</div>`;
+  } else if (item[field]) {
+    previewHtml = `<div class="playlist-preview empty">(プレイリストが見つかりません: ${escapeHtml(item[field])})</div>`;
+  } else if (legacyIds && legacyIds.length) {
+    const titles = legacyIds
+      .map(id => (libraryById[id] ? escapeHtml(libraryById[id].displayTitle) : "(見つかりません)"))
+      .join(" → ");
+    previewHtml = `<div class="playlist-preview">(旧形式の直接指定) ${titles}</div>`;
+  } else {
+    previewHtml = `<div class="playlist-preview empty">(BGMなし)</div>`;
+  }
+
+  return `
+    <select data-idx="${idx}" data-field="${field}">
+      <option value="">(BGMなし)</option>
+      ${options}
+    </select>
+    ${previewHtml}
+  `;
+}
+
 function renderProgram() {
   const container = document.getElementById("program-list");
   container.innerHTML = "";
@@ -374,40 +407,18 @@ function renderProgram() {
     const row = document.createElement("div");
     row.className = "program-item";
 
-    const playlistOptions = playlists.map(p =>
-      `<option value="${p.id}" ${item.playlistId === p.id ? "selected" : ""}>${escapeHtml(p.name)}</option>`
-    ).join("");
-
-    let previewHtml;
-    const selectedPlaylist = item.playlistId ? playlistById[item.playlistId] : null;
     const legacyBgm = !item.playlistId && item.bgm
       ? (Array.isArray(item.bgm) ? item.bgm : [item.bgm])
       : [];
-    if (selectedPlaylist) {
-      const titles = (selectedPlaylist.trackIds || [])
-        .map(id => (libraryById[id] ? escapeHtml(libraryById[id].displayTitle) : "(見つかりません)"))
-        .join(" → ");
-      previewHtml = `<div class="playlist-preview">${titles || "(このプレイリストは空です)"}</div>`;
-    } else if (item.playlistId) {
-      previewHtml = `<div class="playlist-preview empty">(プレイリストが見つかりません: ${escapeHtml(item.playlistId)})</div>`;
-    } else if (legacyBgm.length) {
-      const titles = legacyBgm
-        .map(id => (libraryById[id] ? escapeHtml(libraryById[id].displayTitle) : "(見つかりません)"))
-        .join(" → ");
-      previewHtml = `<div class="playlist-preview">(旧形式の直接指定) ${titles}</div>`;
-    } else {
-      previewHtml = `<div class="playlist-preview empty">(BGMなし・上演中扱い)</div>`;
-    }
 
     row.innerHTML = `
       <span class="muted">#${i + 1}</span>
       <div class="program-item-main">
         <input type="text" value="${escapeAttr(item.name || "")}" data-idx="${i}" data-field="name" placeholder="演目名 (例: 劇『桃太郎』)" />
-        <select data-idx="${i}" data-field="playlistId">
-          <option value="">(BGMなし)</option>
-          ${playlistOptions}
-        </select>
-        ${previewHtml}
+        <label class="playlist-picker-label">転換に使うプレイリスト (この演目に入るとき)</label>
+        ${renderPlaylistPicker(item, i, "playlistId", playlistById, libraryById, legacyBgm)}
+        <label class="playlist-picker-label">上演中に流すプレイリスト (この演目の間ずっと)</label>
+        ${renderPlaylistPicker(item, i, "performingPlaylistId", playlistById, libraryById, null)}
       </div>
       <button class="secondary" data-up="${i}" type="button">↑</button>
       <button class="secondary" data-down="${i}" type="button">↓</button>
@@ -447,7 +458,7 @@ function renderProgram() {
 }
 
 document.getElementById("btn-add-item").addEventListener("click", () => {
-  program.push({ name: "", playlistId: null });
+  program.push({ name: "", playlistId: null, performingPlaylistId: null });
   renderProgram();
 });
 

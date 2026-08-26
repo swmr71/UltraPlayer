@@ -534,17 +534,19 @@ def load_playlists(track_dir: str) -> dict:
 # program.json 形式:
 #   [
 #     {"name": "開会の言葉", "playlistId": null},
-#     {"name": "劇『桃太郎』", "playlistId": "3fa2c1e4-...."},
+#     {"name": "劇『桃太郎』", "playlistId": "3fa2c1e4-....", "performingPlaylistId": "9b7e-...."},
 #     {"name": "合唱", "playlistId": null}
 #   ]
-# "playlistId" はライブラリ(playlists.json)の名前付きプレイリストのidを指す。
-# bgm-library アプリのUIから各演目に転換用プレイリストを割り当てて保存すると、
-# この形式で書き出される。playlistId が無い(null)演目はBGMなしで上演される
-# (劇・演奏など)。プレイリストは1曲以上あればその演目へ転換する際に順番に再生し、
-# 最後まで再生し終えたら先頭に戻ってループする(進行するまで無音にしない)。
+# "playlistId" はライブラリ(playlists.json)の名前付きプレイリストのidを指し、
+# その演目へ「転換する際」に流すBGMを表す。"performingPlaylistId" は、その演目が
+# 「上演中」の間ずっと流すBGM(劇の劇伴・演奏中のBGMなど)を表す、別のプレイリスト。
+# どちらも bgm-library アプリのUIから演目に割り当てて保存すると、この形式で
+# 書き出される。どちらも無い(null)演目は完全にBGMなしで上演される。
+# プレイリストは1曲以上あれば順番に再生し、最後まで再生し終えたら先頭に戻って
+# ループする(次に進むまで無音にしない)。
 #
-# 後方互換: 旧形式の "bgm": [曲id, ...] (プレイリストを介さないインライン指定)
-# が残っている演目は、そのまま読み込んで使う。
+# 後方互換: 旧形式の "bgm": [曲id, ...] (プレイリストを介さないインライン指定、
+# 転換用のみ) が残っている演目は、そのまま読み込んで使う。
 # ------------------------------------------------------------
 class ProgramController:
     def __init__(self, path: str, player: "BGMPlayer"):
@@ -559,16 +561,18 @@ class ProgramController:
         self.started = False  # 最初の進行(N)がまだ押されていない状態
         self.current_idx = 0
         self.target_idx = None
-        self.mode = "performing"  # "performing"(上演中・BGMなし) | "transition"(転換中・BGM再生)
+        self.mode = "performing"  # "performing"(上演中) | "transition"(転換中)
         self.bgm_queue = []
         self.bgm_pos = 0
+        self.active_playlist_id = None  # 現在bgm_queueの元になっているプレイリストid
         self._history = []  # advance()前のスナップショットのスタック (戻る用)
-        # 同じプレイリストを複数の演目で使い回したとき、毎回1曲目からではなく
-        # 前回流れ終わった曲の次から再生されるようにするための再開位置
-        # (playlistId -> 次に再生を始めるインデックス)
+        # 同じプレイリストを複数の演目(転換用・上演中用問わず)で使い回したとき、
+        # 毎回1曲目からではなく前回流れ終わった曲の次から再生されるようにするための
+        # 再開位置 (playlistId -> 次に再生を始めるインデックス)
         self.playlist_positions = {}
 
     def _bgm_ids(self, item: dict):
+        """転換時に流すBGM(曲idリスト)"""
         playlist_id = item.get("playlistId")
         if playlist_id:
             return list(self.playlists.get(playlist_id, []))
@@ -576,6 +580,13 @@ class ProgramController:
         if isinstance(bgm, str):
             bgm = [bgm]
         return bgm
+
+    def _performing_bgm_ids(self, item: dict):
+        """上演中ずっと流すBGM(曲idリスト)"""
+        playlist_id = item.get("performingPlaylistId")
+        if playlist_id:
+            return list(self.playlists.get(playlist_id, []))
+        return []
 
     def _snapshot(self) -> dict:
         return {
@@ -585,6 +596,7 @@ class ProgramController:
             "mode": self.mode,
             "bgm_queue": list(self.bgm_queue),
             "bgm_pos": self.bgm_pos,
+            "active_playlist_id": self.active_playlist_id,
             "playlist_positions": dict(self.playlist_positions),
         }
 
@@ -595,32 +607,48 @@ class ProgramController:
         self.mode = snap["mode"]
         self.bgm_queue = snap["bgm_queue"]
         self.bgm_pos = snap["bgm_pos"]
+        self.active_playlist_id = snap["active_playlist_id"]
         self.playlist_positions = snap["playlist_positions"]
+
+    def _record_resume_position(self):
+        """今流しているプレイリストの再開位置を記録する
+        (次に同じプレイリストを使うときは続きの曲から)。"""
+        if self.active_playlist_id and self.bgm_queue:
+            self.playlist_positions[self.active_playlist_id] = (self.bgm_pos + 1) % len(self.bgm_queue)
+
+    def _play_queue(self, track_ids, playlist_id):
+        self.bgm_queue = track_ids
+        self.bgm_pos = self.playlist_positions.get(playlist_id, 0) % len(track_ids) if playlist_id else 0
+        self.active_playlist_id = playlist_id
+        if not self.player.play_by_id(self.bgm_queue[self.bgm_pos]):
+            print(f"[警告] ライブラリに該当曲が見つかりません (id={self.bgm_queue[self.bgm_pos]})")
 
     def _start_transition(self, target_idx: int) -> str:
         item = self.items[target_idx]
-        playlist_id = item.get("playlistId")
-        self.bgm_queue = self._bgm_ids(item)
-        # 同じプレイリストを使い回す場合は、前回流れ終わった曲の次から再生する
-        self.bgm_pos = self.playlist_positions.get(playlist_id, 0) % len(self.bgm_queue) if playlist_id else 0
-        if not self.player.play_by_id(self.bgm_queue[self.bgm_pos]):
-            print(f"[警告] ライブラリに該当曲が見つかりません (id={self.bgm_queue[self.bgm_pos]})")
+        self._play_queue(self._bgm_ids(item), item.get("playlistId"))
         self.target_idx = target_idx
         self.mode = "transition"
         return f"[PROGRAM] 転換中 -> {item['name']}"
 
     def _start_performing(self, idx: int) -> str:
-        self.player.stop()
-        self.bgm_queue = []
-        self.bgm_pos = 0
+        item = self.items[idx]
+        performing_ids = self._performing_bgm_ids(item)
+        if performing_ids:
+            self._play_queue(performing_ids, item.get("performingPlaylistId"))
+        else:
+            self.player.stop()
+            self.bgm_queue = []
+            self.bgm_pos = 0
+            self.active_playlist_id = None
         self.current_idx = idx
         self.target_idx = None
         self.mode = "performing"
-        return f"[PROGRAM] 上演開始: {self.items[idx]['name']}"
+        suffix = " (BGMあり)" if performing_ids else ""
+        return f"[PROGRAM] 上演開始: {item['name']}{suffix}"
 
     def advance(self) -> str:
         """次第を1つ進める。最初の呼び出しは演目1を開始する
-        (演目1にプレイリストがあれば、まずその転換から明示的に始まる)。
+        (演目1に転換用プレイリストがあれば、まずその転換から明示的に始まる)。
         """
         if not self.started:
             snap = self._snapshot()
@@ -632,10 +660,7 @@ class ProgramController:
 
         if self.mode == "transition":
             snap = self._snapshot()
-            # このプレイリストの再開位置を記録 (次に使い回すときは続きの曲から)
-            playlist_id = self.items[self.target_idx].get("playlistId")
-            if playlist_id and self.bgm_queue:
-                self.playlist_positions[playlist_id] = (self.bgm_pos + 1) % len(self.bgm_queue)
+            self._record_resume_position()
             msg = self._start_performing(self.target_idx)
             self._history.append(snap)
             return msg
@@ -645,6 +670,7 @@ class ProgramController:
             return "[PROGRAM] 次第は最後の演目です"
 
         snap = self._snapshot()
+        self._record_resume_position()
         bgm_ids = self._bgm_ids(self.items[next_idx])
         msg = self._start_transition(next_idx) if bgm_ids else self._start_performing(next_idx)
         self._history.append(snap)
@@ -658,17 +684,20 @@ class ProgramController:
         if not self.started:
             self.player.stop()
             return "[PROGRAM] 開始前に戻りました"
+        if self.bgm_queue:
+            self.player.play_by_id(self.bgm_queue[self.bgm_pos])
+        else:
+            self.player.stop()
         if self.mode == "transition":
-            if self.bgm_queue:
-                self.player.play_by_id(self.bgm_queue[self.bgm_pos])
             return f"[PROGRAM] 転換中に戻りました -> {self.items[self.target_idx]['name']}"
         return f"[PROGRAM] 上演中に戻りました: {self.items[self.current_idx]['name']}"
 
     def tick(self):
-        """転換中のBGMが最後まで再生し終わったら次の曲へ自動的に進める。
-        末尾まで行ったら先頭に戻ってループする。メインループから毎フレーム呼び出す想定。
+        """再生中のBGM(転換用・上演中用どちらも)が最後まで再生し終わったら
+        次の曲へ自動的に進める。末尾まで行ったら先頭に戻ってループする。
+        メインループから毎フレーム呼び出す想定。
         """
-        if self.mode != "transition" or not self.bgm_queue:
+        if not self.bgm_queue:
             return
         if pygame.mixer.music.get_busy():
             return
@@ -689,10 +718,13 @@ class ProgramController:
                 "next_item": self.items[self.target_idx]["name"],
                 "bgm": self.player.current_public(),
             }
-        return {
+        info = {
             "mode": "performing",
             "current_item": self.items[self.current_idx]["name"],
         }
+        if self.bgm_queue:
+            info["bgm"] = self.player.current_public()
+        return info
 
     def _resolve_tracks(self, track_ids):
         """曲idのリストを、管理画面表示用の {id, title, author} のリストに変換する"""
@@ -708,10 +740,10 @@ class ProgramController:
 
     def active_playlist_ids(self):
         """今流してよい曲のidリストを返す (BGMPlayerの⏭/⏮制限に使う)。
-        転換中はそのプレイリスト、それ以外(開始前・上演中)は次に進めると
-        流れる予定のプレイリストを対象にする。
+        BGMが実際に再生中(転換中、または上演中BGM)ならそのプレイリスト、
+        何も流れていなければ次に進めると流れる予定のプレイリストを対象にする。
         """
-        if self.mode == "transition":
+        if self.bgm_queue:
             return list(self.bgm_queue)
         upcoming_idx = 0 if not self.started else self.current_idx + 1
         if upcoming_idx < len(self.items):
@@ -720,8 +752,7 @@ class ProgramController:
 
     def admin_status(self) -> dict:
         """管理画面(control.html)向けの詳細ステータス。進行位置・演目一覧に加え、
-        今再生できる(転換中)/ 次に進めると再生される(上演中・開始前)曲の
-        プレイリストを明示する。
+        今再生できる(転換中・上演中BGM)/ 次に進めると再生される曲のプレイリストを明示する。
         """
         info = self.status()
         info["started"] = self.started
@@ -730,10 +761,11 @@ class ProgramController:
         info["total_items"] = len(self.items)
         info["items"] = [item["name"] for item in self.items]
 
-        if self.mode == "transition":
+        if self.bgm_queue:
             info["current_playlist"] = self._resolve_tracks(self.bgm_queue)
             info["current_playlist_index"] = self.bgm_pos
-        else:
+
+        if self.mode != "transition":
             upcoming_idx = 0 if not self.started else self.current_idx + 1
             if upcoming_idx < len(self.items):
                 info["upcoming_playlist"] = self._resolve_tracks(self._bgm_ids(self.items[upcoming_idx]))
