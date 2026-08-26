@@ -986,11 +986,56 @@ def make_now_playing_server(
 
 
 # ------------------------------------------------------------
+# ポート衝突からの自動復旧
+# 前回のプロセスがCtrl+Cで終了しきれなかった場合など、指定ポートを既に
+# 誰かがLISTENしていたら、そのプロセスを見つけて強制終了する。
+# ------------------------------------------------------------
+def _find_pids_using_port(port: int):
+    pids = set()
+    try:
+        if sys.platform == "win32":
+            out = subprocess.run(
+                ["netstat", "-ano"], capture_output=True, text=True, timeout=5
+            ).stdout
+            for line in out.splitlines():
+                parts = line.split()
+                if len(parts) >= 5 and parts[0] == "TCP" and parts[3] == "LISTENING" and parts[1].endswith(f":{port}"):
+                    pids.add(parts[4])
+        else:
+            out = subprocess.run(
+                ["lsof", "-ti", f"tcp:{port}"], capture_output=True, text=True, timeout=5
+            ).stdout
+            pids.update(p for p in out.split() if p)
+    except Exception:
+        pass
+    return pids
+
+
+def free_port(port: int) -> bool:
+    """ポートを使用中のプロセスを強制終了する。何か殺せたらTrueを返す。"""
+    pids = _find_pids_using_port(port)
+    if not pids:
+        return False
+    for pid in pids:
+        try:
+            if sys.platform == "win32":
+                subprocess.run(["taskkill", "/PID", pid, "/F"], capture_output=True, timeout=5)
+            else:
+                subprocess.run(["kill", "-9", pid], capture_output=True, timeout=5)
+            print(f"[警告] ポート{port}を使用していたプロセス (PID {pid}) を終了しました")
+        except Exception as e:
+            print(f"[警告] PID {pid} を終了できませんでした: {e}")
+    return True
+
+
+# ------------------------------------------------------------
 # bgm-library (Node.js) の自動起動
 # main.py と一緒に `cd bgm-library && npm start` する手間を省くため、
 # 子プロセスとして起動し、main.py終了時に一緒に終了させる。
 # ------------------------------------------------------------
 BGM_LIBRARY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bgm-library")
+# bgm-library/server.js 側もポート衝突時に自身で既存プロセスを終了して
+# 再試行するので、ここでは何もせず子プロセスに任せる。
 
 
 def start_bgm_library(tracks_dir: str, program_file: str | None):
@@ -1128,12 +1173,21 @@ def main():
     if args.api_port:
         try:
             api_server = make_now_playing_server(player, args.api_port, program, command_queue)
+        except OSError as e:
+            print(f"[警告] ポート{args.api_port}が使用中です。既存プロセスを終了して再試行します ({e})")
+            if free_port(args.api_port):
+                time.sleep(0.5)
+                try:
+                    api_server = make_now_playing_server(player, args.api_port, program, command_queue)
+                except OSError as e2:
+                    print(f"[エラー] 再試行しても起動できませんでした: {e2}")
+            else:
+                print(f"[エラー] ポート{args.api_port}を使用しているプロセスが見つかりませんでした")
+        if api_server:
             api_thread = threading.Thread(target=api_server.serve_forever, daemon=True)
             api_thread.start()
             print(f"[API] http://127.0.0.1:{args.api_port}/now-playing で再生情報を取得できます")
             print(f"[管理画面] http://127.0.0.1:{args.api_port}/links.html からcontrol.html等を開けます")
-        except OSError as e:
-            print(f"[警告] APIサーバーを起動できませんでした: {e}")
     _mark("APIサーバー起動")
 
     status_text = "READY"

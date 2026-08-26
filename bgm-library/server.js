@@ -30,7 +30,7 @@ const path = require("path");
 const express = require("express");
 const multer = require("multer");
 const { v4: uuidv4 } = require("uuid");
-const { execFile, spawn } = require("child_process");
+const { execFile, execFileSync, spawn } = require("child_process");
 const { promisify } = require("util");
 const execFileAsync = promisify(execFile);
 
@@ -596,7 +596,7 @@ app.delete("/api/playlists/:id", (req, res) => {
   res.json({ deleted: req.params.id, warning: stillUsed ? "行事の次第から参照されたままです" : null });
 });
 
-app.listen(PORT, async () => {
+async function onServerReady() {
   console.log(`[bgm-library] http://localhost:${PORT} で起動しました`);
   console.log(`[bgm-library] 音源保存先: ${TRACKS_DIR}`);
   console.log(`[bgm-library] 次第ファイル: ${PROGRAM_FILE}`);
@@ -617,4 +617,59 @@ app.listen(PORT, async () => {
   } catch {
     console.log(`[bgm-library] ボーカル除去は無効です ('${PYTHON_CMD} -m demucs' が実行できません。pip install demucs を確認してください)`);
   }
-});
+}
+
+// ポート衝突(前回のプロセスが終了しきれず残っている等)からの自動復旧。
+// そのポートをLISTENしているプロセスを探して強制終了し、1回だけ再試行する。
+function killProcessOnPort(port) {
+  try {
+    if (process.platform === "win32") {
+      const out = execFileSync("netstat", ["-ano"], { encoding: "utf-8" });
+      const pids = new Set();
+      for (const line of out.split("\n")) {
+        const m = line.match(/^\s*TCP\s+\S*:(\d+)\s+\S+\s+LISTENING\s+(\d+)/i);
+        if (m && Number(m[1]) === port) pids.add(m[2]);
+      }
+      if (!pids.size) return false;
+      for (const pid of pids) {
+        try {
+          execFileSync("taskkill", ["/PID", pid, "/F"]);
+          console.log(`[bgm-library] ポート${port}を使用していたプロセス (PID ${pid}) を終了しました`);
+        } catch {}
+      }
+      return true;
+    }
+    const out = execFileSync("lsof", ["-ti", `tcp:${port}`], { encoding: "utf-8" });
+    const pids = out.split("\n").map((s) => s.trim()).filter(Boolean);
+    if (!pids.length) return false;
+    for (const pid of pids) {
+      try {
+        execFileSync("kill", ["-9", pid]);
+        console.log(`[bgm-library] ポート${port}を使用していたプロセス (PID ${pid}) を終了しました`);
+      } catch {}
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function startServer(allowRetry) {
+  const server = app.listen(PORT, onServerReady);
+  server.on("error", (err) => {
+    if (err.code === "EADDRINUSE" && allowRetry) {
+      console.log(`[bgm-library] ポート${PORT}が使用中です。既存プロセスを終了して再試行します`);
+      if (killProcessOnPort(PORT)) {
+        setTimeout(() => startServer(false), 500);
+      } else {
+        console.error(`[bgm-library] ポート${PORT}を解放できませんでした。手動で確認してください`);
+        process.exit(1);
+      }
+    } else {
+      console.error(`[bgm-library] 起動エラー: ${err}`);
+      process.exit(1);
+    }
+  });
+}
+
+startServer(true);
