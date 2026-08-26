@@ -710,6 +710,23 @@ class ProgramController:
             return f"[PROGRAM] 転換中に戻りました -> {self.items[self.target_idx]['name']}"
         return f"[PROGRAM] 上演中に戻りました: {self.items[self.current_idx]['name']}"
 
+    def reset(self) -> str:
+        """進行状態を開始前(未開始)に戻す。リハーサルの続き位置
+        (playlist_positions・戻る履歴など)が本番に持ち越されないように、
+        本番前に手動で呼び出す想定 (advance/backと違いキー割り当てはしない)。
+        """
+        self.player.stop()
+        self.started = False
+        self.current_idx = 0
+        self.target_idx = None
+        self.mode = "performing"
+        self.bgm_queue = []
+        self.bgm_pos = 0
+        self.active_playlist_id = None
+        self._history = []
+        self.playlist_positions = {}
+        return "[PROGRAM] 開始前の状態にリセットしました"
+
     def tick(self):
         """再生中のBGM(転換用・上演中用どちらも)が最後まで再生し終わったら
         次の曲へ自動的に進める。末尾まで行ったら先頭に戻ってループする。
@@ -975,6 +992,12 @@ def make_now_playing_server(
                 else:
                     command_queue.put("PROGRAM_BACK")
                     self._send_json({"queued": "PROGRAM_BACK"}, status=202)
+            elif self.path == "/program/reset":
+                if program is None or command_queue is None:
+                    self._send_json({"error": "program not enabled (--program を指定してください)"}, status=400)
+                else:
+                    command_queue.put("PROGRAM_RESET")
+                    self._send_json({"queued": "PROGRAM_RESET"}, status=202)
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -1202,6 +1225,9 @@ def main():
             elif queued_command == "PROGRAM_BACK":
                 if program:
                     status_text = program.back()
+            elif queued_command == "PROGRAM_RESET":
+                if program:
+                    status_text = program.reset()
             else:
                 status_text = apply_command(player, queued_command, prefix="CMD")
 

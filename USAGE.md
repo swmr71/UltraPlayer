@@ -198,6 +198,15 @@ last.fm APIキーは https://www.lastfm.jp/api/account/create で無料取得で
 何も流れていなければ「次に進めると流れるプレイリスト」としてこの後 `N` を押したときに
 流れる予定の曲を先に確認できる。
 
+### リハーサル後のリセット
+
+同じプレイリストを使い回したときの再開位置(上記)や「戻る」履歴は、`main.py`
+を再起動しない限り進行状態としてプロセス内に残り続ける。リハーサルをそのまま
+本番に持ち越したくない場合は、`control.html` の次第カードにある
+「↺ 最初からにリセット」ボタン(または `POST /program/reset`)を本番直前に押すと、
+`main.py` を再起動せずに進行状態(現在の演目・戻る履歴・再開位置すべて)を
+開始前の状態に戻せる。誤操作防止のため確認ダイアログが出る。
+
 ### 後方互換
 
 古い形式(演目に `"bgm": [曲id, ...]` を直接指定)で保存された `program.json` も
@@ -299,6 +308,7 @@ CORSヘッダー付き(ブラウザ/OBSから直接fetch可能)。
 | `POST` | `/command` | 再生操作。Body: `{"command": "PLAY_PAUSE"\|"STOP"\|"NEXT"\|"PREV"\|"VOL_UP"\|"VOL_DOWN"\|"REPEAT_TOGGLE"\|"RESTRICT_TOGGLE"}`。202で受理、内部のコマンドキューに積まれメインループで実行される |
 | `POST` | `/program/advance` | 次第を次の演目へ進める(`--program` 未指定時は400) |
 | `POST` | `/program/back` | 直前の `/program/advance` を1つ取り消す(`--program` 未指定時は400) |
+| `POST` | `/program/reset` | 進行状態を開始前(未開始)にリセットする。同じプレイリストの再開位置(`playlist_positions`)や戻る履歴も含めて全部クリアされる。リハーサルの続き位置が本番に持ち越されないよう、本番前に`control.html`の「↺ 最初からにリセット」ボタン(またはこのAPI)を呼ぶ想定(`--program` 未指定時は400) |
 | `GET` | `/calib` | モニター1・2のキャリブレーション状態 `{"1": {heightCm, yOffsetPx}, "2": {...}}` |
 | `POST` | `/calib` | キャリブレーション更新。Body例: `{"monitor": "1", "heightCm": 30}` または `{"monitor": "1", "yOffsetPx": 10}` |
 
