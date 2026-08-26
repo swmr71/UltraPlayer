@@ -524,7 +524,12 @@ def load_playlists(track_dir: str) -> dict:
     """tracks/playlists.json (bgm-library で作成する名前付き転換用プレイリスト) を
     id -> {"trackIds": [...], "loop": bool} の辞書として読み込む。
     "loop" は最後まで流れたら先頭に戻ってループするか(既定True、bgm-libraryの
-    チェックボックスで曲ごとにOFFにできる)。ファイルが無ければ空辞書を返す。
+    チェックボックスで曲ごとにOFFにできる)。
+
+    "結合プレイリスト" (sourcePlaylistIds に他のプレイリストidを順番に指定した
+    もの) は、参照先プレイリストの曲を順につなげたものとしてここで展開する
+    (以降のコードは通常のプレイリストと同じ trackIds のリストとして扱える)。
+    循環参照は空扱いにして無限ループを防ぐ。ファイルが無ければ空辞書を返す。
     """
     path = os.path.join(track_dir, "playlists.json")
     if not os.path.isfile(path):
@@ -532,13 +537,28 @@ def load_playlists(track_dir: str) -> dict:
     try:
         with open(path, "r", encoding="utf-8") as f:
             entries = json.load(f)
-        return {
-            p["id"]: {"trackIds": p.get("trackIds", []), "loop": p.get("loop", True)}
-            for p in entries
-        }
     except Exception as e:
         print(f"[警告] playlists.jsonの読み込みに失敗しました: {e}")
         return {}
+
+    raw = {p["id"]: p for p in entries}
+
+    def resolve(pid, ancestors=frozenset()):
+        if pid in ancestors:
+            return []
+        p = raw.get(pid)
+        if not p:
+            return []
+        source_ids = p.get("sourcePlaylistIds") or []
+        if source_ids:
+            next_ancestors = ancestors | {pid}
+            ids = []
+            for sid in source_ids:
+                ids.extend(resolve(sid, next_ancestors))
+            return ids
+        return list(p.get("trackIds", []))
+
+    return {pid: {"trackIds": resolve(pid), "loop": p.get("loop", True)} for pid, p in raw.items()}
 
 
 # program.json 形式:

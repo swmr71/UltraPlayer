@@ -350,16 +350,37 @@ function pollVocalRemovalJob(trackId, jobId) {
   tick();
 }
 
+// 結合プレイリスト(sourcePlaylistIdsで他のプレイリストを順番に繋げたもの)を
+// 曲idの一次元リストに展開する。循環参照はそこで打ち切って空扱いにする
+// (main.pyのload_playlists()と同じロジック)。
+function resolvePlaylistTrackIds(allPlaylists, playlistId, ancestors) {
+  ancestors = ancestors || new Set();
+  if (ancestors.has(playlistId)) return [];
+  const pl = allPlaylists.find(p => p.id === playlistId);
+  if (!pl) return [];
+  const sourceIds = pl.sourcePlaylistIds || [];
+  if (sourceIds.length) {
+    const nextAncestors = new Set(ancestors);
+    nextAncestors.add(playlistId);
+    return sourceIds.flatMap(id => resolvePlaylistTrackIds(allPlaylists, id, nextAncestors));
+  }
+  return pl.trackIds || [];
+}
+
 function renderPlaylistManager() {
   const container = document.getElementById("playlist-manager-list");
   container.innerHTML = "";
   const libraryById = Object.fromEntries(library.map(t => [t.id, t]));
+  const playlistById = Object.fromEntries(playlists.map(p => [p.id, p]));
 
   playlists.forEach((pl, i) => {
     const card = document.createElement("div");
     card.className = "playlist-card";
 
+    const isCombined = (pl.sourcePlaylistIds || []).length > 0;
     const trackIds = pl.trackIds || [];
+    const resolvedTrackIds = isCombined ? resolvePlaylistTrackIds(playlists, pl.id) : trackIds;
+
     const chips = trackIds.map((id, ci) => {
       const t = libraryById[id];
       const label = t ? escapeHtml(t.title) : `(見つかりません: ${escapeHtml(id)})`;
@@ -374,18 +395,40 @@ function renderPlaylistManager() {
         </div>`;
     }).join("");
 
-    const totalSec = trackIds.reduce((sum, id) => {
+    const sourceIds = pl.sourcePlaylistIds || [];
+    const sourceChips = sourceIds.map((id, ci) => {
+      const sub = playlistById[id];
+      const label = sub ? escapeHtml(sub.name || "(無題)") : `(見つかりません: ${escapeHtml(id)})`;
+      const subDur = sub ? formatDuration(resolvePlaylistTrackIds(playlists, id).reduce((sum, tid) => {
+        const d = libraryById[tid] && libraryById[tid].durationSec;
+        return d != null ? sum + d : sum;
+      }, 0)) : null;
+      return `
+        <div class="bgm-chip">
+          <span class="muted">${ci + 1}.</span>
+          <span class="bgm-chip-title">${label}${subDur ? ` <span class="muted">(${subDur})</span>` : ""}</span>
+          <button class="secondary" data-pl-src-up="${i}:${ci}" type="button">↑</button>
+          <button class="secondary" data-pl-src-down="${i}:${ci}" type="button">↓</button>
+          <button class="danger" data-pl-src-remove="${i}:${ci}" type="button">×</button>
+        </div>`;
+    }).join("");
+
+    const totalSec = resolvedTrackIds.reduce((sum, id) => {
       const d = libraryById[id] && libraryById[id].durationSec;
       return d != null ? sum + d : sum;
     }, 0);
-    const unknownCount = trackIds.filter(id => !libraryById[id] || libraryById[id].durationSec == null).length;
-    const totalLabel = trackIds.length
+    const unknownCount = resolvedTrackIds.filter(id => !libraryById[id] || libraryById[id].durationSec == null).length;
+    const totalLabel = resolvedTrackIds.length
       ? `合計時間: ${formatDuration(totalSec)}${unknownCount ? ` (${unknownCount}曲は長さ不明)` : ""}`
       : "";
 
     const availableOptions = library.map(t =>
       `<option value="${t.id}">${escapeHtml(t.title)}</option>`
     ).join("");
+    const availablePlaylistOptions = playlists
+      .filter(p => p.id !== pl.id)
+      .map(p => `<option value="${p.id}">${escapeHtml(p.name || "(無題)")}</option>`)
+      .join("");
 
     card.innerHTML = `
       <div class="row-inline">
@@ -397,16 +440,32 @@ function renderPlaylistManager() {
         <input type="checkbox" data-pl-idx="${i}" data-pl-loop ${pl.loop === false ? "" : "checked"} />
         最後まで流れたら繰り返す(オフだと1回流れたら無音のまま止まります)
       </label>
+      <label class="pl-loop-label">
+        <input type="checkbox" data-pl-idx="${i}" data-pl-combined ${isCombined ? "checked" : ""} />
+        結合プレイリストにする(曲ではなく既存プレイリストを順番につなげる。例: A→Bと再生したいならAとBを追加)
+      </label>
       ${totalLabel ? `<div class="playlist-total">${totalLabel}</div>` : ""}
-      <div class="bgm-playlist">
-        ${chips || '<span class="muted">(曲が未登録です)</span>'}
-      </div>
-      <div class="bgm-add-row">
-        <select data-pl-add-track="${i}">
-          <option value="">+ 曲を追加...</option>
-          ${availableOptions}
-        </select>
-      </div>
+      ${isCombined ? `
+        <div class="bgm-playlist">
+          ${sourceChips || '<span class="muted">(プレイリストが未登録です)</span>'}
+        </div>
+        <div class="bgm-add-row">
+          <select data-pl-add-source="${i}">
+            <option value="">+ プレイリストを追加...</option>
+            ${availablePlaylistOptions}
+          </select>
+        </div>
+      ` : `
+        <div class="bgm-playlist">
+          ${chips || '<span class="muted">(曲が未登録です)</span>'}
+        </div>
+        <div class="bgm-add-row">
+          <select data-pl-add-track="${i}">
+            <option value="">+ 曲を追加...</option>
+            ${availableOptions}
+          </select>
+        </div>
+      `}
     `;
     container.appendChild(card);
   });
@@ -438,6 +497,47 @@ function renderPlaylistManager() {
       if (!el.value) return;
       const pl = playlists[Number(el.dataset.plAddTrack)];
       await savePlaylistTracks(pl.id, [...(pl.trackIds || []), el.value]);
+    });
+  });
+  container.querySelectorAll("input[data-pl-combined]").forEach(el => {
+    el.addEventListener("change", async () => {
+      const pl = playlists[Number(el.dataset.plIdx)];
+      // オフに戻すときは sourcePlaylistIds を空にして通常のプレイリストに戻す。
+      // オンにするときは(曲がまだ空でも)空配列を送って結合モードの表示に切り替える。
+      await savePlaylistSources(pl.id, el.checked ? (pl.sourcePlaylistIds || []) : []);
+    });
+  });
+  container.querySelectorAll("select[data-pl-add-source]").forEach(el => {
+    el.addEventListener("change", async () => {
+      if (!el.value) return;
+      const pl = playlists[Number(el.dataset.plAddSource)];
+      await savePlaylistSources(pl.id, [...(pl.sourcePlaylistIds || []), el.value]);
+    });
+  });
+  container.querySelectorAll("button[data-pl-src-remove]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const [i, ci] = btn.dataset.plSrcRemove.split(":").map(Number);
+      const sourceIds = [...playlists[i].sourcePlaylistIds];
+      sourceIds.splice(ci, 1);
+      await savePlaylistSources(playlists[i].id, sourceIds);
+    });
+  });
+  container.querySelectorAll("button[data-pl-src-up]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const [i, ci] = btn.dataset.plSrcUp.split(":").map(Number);
+      if (ci === 0) return;
+      const sourceIds = [...playlists[i].sourcePlaylistIds];
+      [sourceIds[ci - 1], sourceIds[ci]] = [sourceIds[ci], sourceIds[ci - 1]];
+      await savePlaylistSources(playlists[i].id, sourceIds);
+    });
+  });
+  container.querySelectorAll("button[data-pl-src-down]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const [i, ci] = btn.dataset.plSrcDown.split(":").map(Number);
+      const sourceIds = [...playlists[i].sourcePlaylistIds];
+      if (ci >= sourceIds.length - 1) return;
+      [sourceIds[ci + 1], sourceIds[ci]] = [sourceIds[ci], sourceIds[ci + 1]];
+      await savePlaylistSources(playlists[i].id, sourceIds);
     });
   });
   container.querySelectorAll("button[data-pl-chip-remove]").forEach(btn => {
@@ -485,6 +585,15 @@ async function savePlaylistTracks(id, trackIds) {
   await refreshPlaylists();
 }
 
+async function savePlaylistSources(id, sourcePlaylistIds) {
+  await fetch(`/api/playlists/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sourcePlaylistIds }),
+  });
+  await refreshPlaylists();
+}
+
 document.getElementById("btn-add-playlist").addEventListener("click", async () => {
   const name = prompt("プレイリスト名を入力してください", "");
   if (!name || !name.trim()) return;
@@ -504,7 +613,10 @@ function renderPlaylistPicker(item, idx, field, playlistById, libraryById, legac
   let previewHtml;
   const selected = item[field] ? playlistById[item[field]] : null;
   if (selected) {
-    const titles = (selected.trackIds || [])
+    const resolvedIds = (selected.sourcePlaylistIds || []).length
+      ? resolvePlaylistTrackIds(playlists, selected.id)
+      : (selected.trackIds || []);
+    const titles = resolvedIds
       .map(id => (libraryById[id] ? escapeHtml(libraryById[id].displayTitle) : "(見つかりません)"))
       .join(" → ");
     previewHtml = `<div class="playlist-preview">${titles || "(このプレイリストは空です)"}</div>`;

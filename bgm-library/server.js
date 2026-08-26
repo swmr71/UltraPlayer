@@ -634,6 +634,9 @@ app.patch("/api/playlists/:id", (req, res) => {
   if (typeof req.body.note === "string") entry.note = req.body.note.trim();
   if (Array.isArray(req.body.trackIds)) entry.trackIds = req.body.trackIds;
   if (typeof req.body.loop === "boolean") entry.loop = req.body.loop;
+  // 結合プレイリスト(他のプレイリストを順番につなげたもの)。空配列を渡すと
+  // 通常のプレイリスト(trackIds使用)に戻せる。
+  if (Array.isArray(req.body.sourcePlaylistIds)) entry.sourcePlaylistIds = req.body.sourcePlaylistIds;
   savePlaylists(playlists);
   res.json(entry);
 });
