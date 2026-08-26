@@ -199,6 +199,11 @@ npm start
   [yt-dlp](https://github.com/yt-dlp/yt-dlp) と [ffmpeg](https://ffmpeg.org/) が
   別途必要です(`pip install yt-dlp` + ffmpegをPATHに通す)。ダウンロードした音源の
   著作権・利用規約の確認は利用者側の責任で行ってください。
+- ボーカル除去(AI): 登録済みの曲の「ボーカル除去」ボタンを押すと、
+  [Demucs](https://github.com/facebookresearch/demucs) でインストゥルメンタル版を
+  生成し、`(Instrumental)` 付きの新しい曲としてライブラリに追加します(元の曲は
+  そのまま残ります)。`pip install demucs`(main.py と同じvenv)が必要で、CPU実行の
+  場合は曲の長さと同程度〜数倍の処理時間がかかります。
 - 行事の次第: 発表項目を追加し、各項目にライブラリの曲をプレイリストとして
   複数割り当てられます(`../program.json` に保存され、`main.py --program` が
   読み込みます)。

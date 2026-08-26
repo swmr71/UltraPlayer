@@ -13,6 +13,9 @@
  * - YouTubeのURLを渡すと yt-dlp + ffmpeg で音声を抽出してライブラリに登録できる
  *   (要 yt-dlp / ffmpeg のインストール)。ダウンロードした音源の著作権・利用規約は
  *   利用者側の責任で確認すること。
+ * - 登録済みの曲から「ボーカル除去」でDemucs (要 pip install demucs、main.py と
+ *   同じvenv) を実行し、インストゥルメンタル版を新しい曲として追加できる。
+ *   CPU実行のため曲の長さと同程度〜数倍の処理時間がかかる。
  */
 
 require("dotenv").config();
@@ -32,6 +35,19 @@ const LIBRARY_FILE = path.join(TRACKS_DIR, "tracks.json");
 
 const LASTFM_API_KEY = process.env.LASTFM_API_KEY || "";
 const YT_DLP_CMD = process.env.YT_DLP_CMD || "yt-dlp";
+const FFMPEG_CMD = process.env.FFMPEG_CMD || "ffmpeg";
+
+// ボーカル除去(Demucs)は main.py と同じvenvのPythonから `python -m demucs` で叩く。
+// PYTHON_CMD を明示指定しなければ、隣のvenvを自動検出する。
+function resolvePythonCmd() {
+  if (process.env.PYTHON_CMD) return process.env.PYTHON_CMD;
+  const winVenv = path.resolve(__dirname, "../venv/Scripts/python.exe");
+  const posixVenv = path.resolve(__dirname, "../venv/bin/python");
+  if (fs.existsSync(winVenv)) return winVenv;
+  if (fs.existsSync(posixVenv)) return posixVenv;
+  return process.platform === "win32" ? "python" : "python3";
+}
+const PYTHON_CMD = resolvePythonCmd();
 
 fs.mkdirSync(TRACKS_DIR, { recursive: true });
 
@@ -123,6 +139,37 @@ async function downloadYoutubeAudio(url, id) {
     throw new Error("ダウンロードは完了しましたが、mp3ファイルが見つかりません");
   }
   return filename;
+}
+
+// ------------------------------------------------------------
+// AIボーカル除去 (Demucs, htdemucsモデル)
+// ------------------------------------------------------------
+async function removeVocals(sourcePath, newId) {
+  const workDir = path.join(TRACKS_DIR, `.demucs-${newId}`);
+  fs.mkdirSync(workDir, { recursive: true });
+  try {
+    await execFileAsync(
+      PYTHON_CMD,
+      ["-m", "demucs", "--two-stems=vocals", "-o", workDir, sourcePath],
+      { maxBuffer: 20 * 1024 * 1024, timeout: 10 * 60 * 1000 }
+    );
+
+    const baseName = path.parse(sourcePath).name;
+    const wavPath = path.join(workDir, "htdemucs", baseName, "no_vocals.wav");
+    if (!fs.existsSync(wavPath)) {
+      throw new Error("ボーカル除去は完了しましたが、出力ファイルが見つかりません");
+    }
+
+    const filename = `${newId}.mp3`;
+    await execFileAsync(
+      FFMPEG_CMD,
+      ["-y", "-i", wavPath, "-codec:a", "libmp3lame", "-qscale:a", "2", path.join(TRACKS_DIR, filename)],
+      { maxBuffer: 20 * 1024 * 1024, timeout: 60 * 1000 }
+    );
+    return filename;
+  } finally {
+    fs.rm(workDir, { recursive: true, force: true }, () => {});
+  }
 }
 
 // ------------------------------------------------------------
@@ -240,6 +287,43 @@ app.post("/api/tracks/from-youtube", async (req, res) => {
   }
 });
 
+// ボーカル除去 (Demucs) を実行し、インストゥルメンタル版を新しい曲として登録する
+app.post("/api/tracks/:id/remove-vocals", async (req, res) => {
+  const library = loadLibrary();
+  const entry = library.find((t) => t.id === req.params.id);
+  if (!entry) {
+    res.status(404).json({ error: "not found" });
+    return;
+  }
+  const sourcePath = path.join(TRACKS_DIR, entry.filename);
+  if (!fs.existsSync(sourcePath)) {
+    res.status(404).json({ error: "元の音源ファイルが見つかりません" });
+    return;
+  }
+
+  const newId = uuidv4();
+  try {
+    const filename = await removeVocals(sourcePath, newId);
+    const newEntry = {
+      id: newId,
+      filename,
+      title: `${entry.title} (Instrumental)`,
+      displayTitle: `${entry.displayTitle} (Instrumental)`,
+      author: entry.author,
+      arranged: true,
+      note: ["AIボーカル除去 (Demucs)", entry.note].filter(Boolean).join(" / "),
+      sourceTrackId: entry.id,
+      createdAt: new Date().toISOString(),
+    };
+    const current = loadLibrary();
+    current.push(newEntry);
+    saveLibrary(current);
+    res.status(201).json(newEntry);
+  } catch (e) {
+    res.status(502).json({ error: `ボーカル除去に失敗しました: ${String(e.message || e)}` });
+  }
+});
+
 // 曲メタデータ編集 (曲名/表示用曲名/作者/注記/BGM化フラグ)
 app.patch("/api/tracks/:id", (req, res) => {
   const library = loadLibrary();
@@ -323,5 +407,10 @@ app.listen(PORT, async () => {
     await execFileAsync(YT_DLP_CMD, ["--version"], { timeout: 5000 });
   } catch {
     console.log(`[bgm-library] YouTubeダウンロードは無効です (yt-dlp が見つかりません: '${YT_DLP_CMD}'。pip install yt-dlp とffmpegの導入が必要です)`);
+  }
+  try {
+    await execFileAsync(PYTHON_CMD, ["-m", "demucs", "--help"], { timeout: 15000 });
+  } catch {
+    console.log(`[bgm-library] ボーカル除去は無効です ('${PYTHON_CMD} -m demucs' が実行できません。pip install demucs を確認してください)`);
   }
 });

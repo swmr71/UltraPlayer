@@ -5,3 +5,6 @@ Pillow
 
 vosk
 pyaudio
+
+# bgm-library の「ボーカル除去」機能で使う (任意。使わないなら不要)
+demucs

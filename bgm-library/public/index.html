@@ -99,7 +99,7 @@
   <div class="card">
     <table>
       <thead>
-        <tr><th>表示用曲名</th><th>曲名(内部)</th><th>作者</th><th>注記</th><th></th></tr>
+        <tr><th>表示用曲名</th><th>曲名(内部)</th><th>作者</th><th>注記</th><th></th><th></th></tr>
       </thead>
       <tbody id="library-body"></tbody>
     </table>
@@ -139,6 +139,7 @@ function renderLibrary() {
       <td><input type="text" value="${escapeAttr(t.title)}" data-field="title" data-id="${t.id}" /></td>
       <td><input type="text" value="${escapeAttr(t.author)}" data-field="author" data-id="${t.id}" /></td>
       <td>${t.arranged ? '<span class="badge">BGM化</span> ' : ''}<input type="text" value="${escapeAttr(t.note)}" data-field="note" data-id="${t.id}" /></td>
+      <td><button class="secondary" data-devocal="${t.id}">ボーカル除去</button></td>
       <td><button class="danger" data-del="${t.id}">削除</button></td>
     `;
     body.appendChild(tr);
@@ -160,6 +161,28 @@ function renderLibrary() {
       const r = await fetch(`/api/tracks/${btn.dataset.del}`, { method: "DELETE" }).then(r => r.json());
       if (r.warning) alert(r.warning);
       await refreshLibrary();
+    });
+  });
+  body.querySelectorAll("button[data-devocal]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      const original = btn.textContent;
+      btn.textContent = "処理中...(数十秒〜数分)";
+      try {
+        const res = await fetch(`/api/tracks/${btn.dataset.devocal}/remove-vocals`, { method: "POST" });
+        const data = await res.json();
+        if (!res.ok) {
+          alert(data.error || "ボーカル除去に失敗しました");
+          btn.disabled = false;
+          btn.textContent = original;
+          return;
+        }
+        await refreshLibrary();
+      } catch (e) {
+        alert("ボーカル除去に失敗しました");
+        btn.disabled = false;
+        btn.textContent = original;
+      }
     });
   });
 }
