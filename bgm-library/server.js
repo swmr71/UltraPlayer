@@ -43,6 +43,7 @@ const PLAYLISTS_FILE = path.join(TRACKS_DIR, "playlists.json");
 const LASTFM_API_KEY = process.env.LASTFM_API_KEY || "";
 const YT_DLP_CMD = process.env.YT_DLP_CMD || "yt-dlp";
 const FFMPEG_CMD = process.env.FFMPEG_CMD || "ffmpeg";
+const FFPROBE_CMD = process.env.FFPROBE_CMD || "ffprobe";
 
 // ボーカル除去(Demucs)は main.py と同じvenvのPythonから `python -m demucs` で叩く。
 // PYTHON_CMD を明示指定しなければ、隣のvenvを自動検出する。
@@ -104,6 +105,25 @@ function loadLibrary() {
 
 function saveLibrary(list) {
   fs.writeFileSync(LIBRARY_FILE, JSON.stringify(list, null, 2), "utf-8");
+}
+
+// ------------------------------------------------------------
+// 曲の長さ (秒)。ffprobe (ffmpeg付属) で取得し tracks.json に durationSec として
+// キャッシュする。プレイリストの合計時間表示に使う。ffprobeが無い環境では
+// null のままになり、その曲は合計時間の計算から除外される。
+// ------------------------------------------------------------
+async function probeDurationSec(filePath) {
+  try {
+    const { stdout } = await execFileAsync(
+      FFPROBE_CMD,
+      ["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", filePath],
+      { timeout: 15000 }
+    );
+    const sec = parseFloat(stdout.trim());
+    return Number.isFinite(sec) ? sec : null;
+  } catch {
+    return null;
+  }
 }
 
 // ------------------------------------------------------------
@@ -354,7 +374,7 @@ app.get("/api/tracks", (req, res) => {
 });
 
 // 曲アップロード
-app.post("/api/tracks", upload.single("file"), (req, res) => {
+app.post("/api/tracks", upload.single("file"), async (req, res) => {
   if (!req.file) {
     res.status(400).json({ error: "音源ファイル(mp3/wav/ogg)を指定してください" });
     return;
@@ -374,6 +394,7 @@ app.post("/api/tracks", upload.single("file"), (req, res) => {
     author: (req.body.author || "").trim(),
     arranged: req.body.arranged === "true" || req.body.arranged === true,
     note: (req.body.note || "").trim(),
+    durationSec: await probeDurationSec(req.file.path),
     createdAt: new Date().toISOString(),
   };
 
@@ -427,6 +448,7 @@ app.post("/api/tracks/from-youtube", async (req, res) => {
       arranged: req.body.arranged === true || req.body.arranged === "true",
       note: (req.body.note || "").trim(),
       sourceUrl: url,
+      durationSec: await probeDurationSec(path.join(TRACKS_DIR, filename)),
       createdAt: new Date().toISOString(),
     };
     const library = loadLibrary();
@@ -460,7 +482,7 @@ app.post("/api/tracks/:id/remove-vocals", (req, res) => {
     const job = jobs.get(jobId);
     if (job) job.progress = progress;
   })
-    .then((filename) => {
+    .then(async (filename) => {
       const newEntry = {
         id: newId,
         filename,
@@ -472,6 +494,7 @@ app.post("/api/tracks/:id/remove-vocals", (req, res) => {
         arranged: true,
         note: ["AIボーカル除去 (Demucs)", entry.note].filter(Boolean).join(" / "),
         sourceTrackId: entry.id,
+        durationSec: await probeDurationSec(path.join(TRACKS_DIR, filename)),
         createdAt: new Date().toISOString(),
       };
       const current = loadLibrary();
@@ -652,6 +675,29 @@ async function onServerReady() {
   } catch {
     console.log(`[bgm-library] ボーカル除去は無効です ('${PYTHON_CMD} -m demucs' が実行できません。pip install demucs を確認してください)`);
   }
+  try {
+    await execFileAsync(FFPROBE_CMD, ["-version"], { timeout: 5000 });
+    backfillDurations(); // 起動をブロックしないよう待たずに投げる
+  } catch {
+    console.log(`[bgm-library] 曲の長さ(プレイリスト合計時間)取得は無効です (ffprobe が見つかりません: '${FFPROBE_CMD}')`);
+  }
+}
+
+// 既存曲でdurationSecが未設定のものをバックグラウンドで一括取得する
+// (この機能を追加する前にアップロード済みの曲を遡って埋めるため)。
+async function backfillDurations() {
+  const library = loadLibrary();
+  const targets = library.filter((t) => t.durationSec == null && fs.existsSync(path.join(TRACKS_DIR, t.filename)));
+  if (!targets.length) return;
+  console.log(`[bgm-library] 曲の長さ未取得が${targets.length}件あります。バックグラウンドで取得します...`);
+  for (const t of targets) {
+    t.durationSec = await probeDurationSec(path.join(TRACKS_DIR, t.filename));
+  }
+  saveLibrary(loadLibrary().map((t) => {
+    const updated = targets.find((u) => u.id === t.id);
+    return updated ? { ...t, durationSec: updated.durationSec } : t;
+  }));
+  console.log(`[bgm-library] 曲の長さの取得が完了しました`);
 }
 
 // ポート衝突(前回のプロセスが終了しきれず残っている等)からの自動復旧。

@@ -47,6 +47,7 @@
   .playlist-card input[type=text] { width: auto; flex: 1; }
   .pl-loop-label { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 12px; color: #aaa; }
   .pl-loop-label input[type=checkbox] { width: auto; }
+  .playlist-total { margin-top: 8px; font-size: 12px; color: #9fd6a8; }
   button.preview-play { background: #2f8f5b; margin-top: 0; padding: 4px 10px; min-width: 34px; }
   button.preview-play.playing { background: #b3453f; }
   tr.track-child-row { background: #20222b; }
@@ -358,18 +359,29 @@ function renderPlaylistManager() {
     const card = document.createElement("div");
     card.className = "playlist-card";
 
-    const chips = (pl.trackIds || []).map((id, ci) => {
+    const trackIds = pl.trackIds || [];
+    const chips = trackIds.map((id, ci) => {
       const t = libraryById[id];
       const label = t ? escapeHtml(t.title) : `(見つかりません: ${escapeHtml(id)})`;
+      const dur = t && t.durationSec != null ? ` <span class="muted">(${formatDuration(t.durationSec)})</span>` : "";
       return `
         <div class="bgm-chip">
           <span class="muted">${ci + 1}.</span>
-          <span class="bgm-chip-title">${label}</span>
+          <span class="bgm-chip-title">${label}${dur}</span>
           <button class="secondary" data-pl-chip-up="${i}:${ci}" type="button">↑</button>
           <button class="secondary" data-pl-chip-down="${i}:${ci}" type="button">↓</button>
           <button class="danger" data-pl-chip-remove="${i}:${ci}" type="button">×</button>
         </div>`;
     }).join("");
+
+    const totalSec = trackIds.reduce((sum, id) => {
+      const d = libraryById[id] && libraryById[id].durationSec;
+      return d != null ? sum + d : sum;
+    }, 0);
+    const unknownCount = trackIds.filter(id => !libraryById[id] || libraryById[id].durationSec == null).length;
+    const totalLabel = trackIds.length
+      ? `合計時間: ${formatDuration(totalSec)}${unknownCount ? ` (${unknownCount}曲は長さ不明)` : ""}`
+      : "";
 
     const availableOptions = library.map(t =>
       `<option value="${t.id}">${escapeHtml(t.title)}</option>`
@@ -385,6 +397,7 @@ function renderPlaylistManager() {
         <input type="checkbox" data-pl-idx="${i}" data-pl-loop ${pl.loop === false ? "" : "checked"} />
         最後まで流れたら繰り返す(オフだと1回流れたら無音のまま止まります)
       </label>
+      ${totalLabel ? `<div class="playlist-total">${totalLabel}</div>` : ""}
       <div class="bgm-playlist">
         ${chips || '<span class="muted">(曲が未登録です)</span>'}
       </div>
@@ -692,6 +705,17 @@ function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 function escapeAttr(s) { return escapeHtml(s); }
+
+function formatDuration(sec) {
+  if (sec == null || !Number.isFinite(sec)) return "?:??";
+  sec = Math.round(sec);
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  const mm = h > 0 ? String(m).padStart(2, "0") : String(m);
+  const ss = String(s).padStart(2, "0");
+  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+}
 
 // ページ再読み込みでもボーカル除去の進捗表示が消えないように、サーバー側に
 // 残っている実行中ジョブを引き継ぐ (ジョブ自体はサーバー側で継続していて、
