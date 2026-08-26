@@ -676,7 +676,26 @@ function escapeHtml(s) {
 }
 function escapeAttr(s) { return escapeHtml(s); }
 
+// ページ再読み込みでもボーカル除去の進捗表示が消えないように、サーバー側に
+// 残っている実行中ジョブを引き継ぐ (ジョブ自体はサーバー側で継続していて、
+// 単にブラウザ側の進捗管理(activeVocalJobs)がページと一緒に消えるだけだった)。
+async function resumeActiveVocalJobs() {
+  let runningJobs;
+  try {
+    runningJobs = await fetch("/api/jobs").then(r => r.json());
+  } catch (e) {
+    return;
+  }
+  for (const j of runningJobs) {
+    if (j.trackId) activeVocalJobs[j.trackId] = { jobId: j.jobId, progress: j.progress ?? 0 };
+  }
+  for (const j of runningJobs) {
+    if (j.trackId) pollVocalRemovalJob(j.trackId, j.jobId);
+  }
+}
+
 (async () => {
+  await resumeActiveVocalJobs();
   await refreshLibrary();
   await refreshPlaylists();
   await refreshProgram();

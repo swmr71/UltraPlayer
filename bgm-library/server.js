@@ -201,11 +201,11 @@ async function downloadYoutubeAudio(url, id) {
 // 非同期ジョブ管理 (ボーカル除去は数十秒〜数分かかるため、
 // レスポンスを待たせずジョブIDを返し、進捗をポーリングで取得できるようにする)
 // ------------------------------------------------------------
-const jobs = new Map(); // jobId -> {status: "running"|"done"|"error", progress, error?, result?}
+const jobs = new Map(); // jobId -> {status: "running"|"done"|"error", progress, trackId?, error?, result?}
 
-function createJob() {
+function createJob(trackId) {
   const id = uuidv4();
-  jobs.set(id, { status: "running", progress: 0 });
+  jobs.set(id, { status: "running", progress: 0, trackId });
   return id;
 }
 
@@ -453,7 +453,7 @@ app.post("/api/tracks/:id/remove-vocals", (req, res) => {
   }
 
   const newId = uuidv4();
-  const jobId = createJob();
+  const jobId = createJob(entry.id);
   res.status(202).json({ jobId });
 
   removeVocals(sourcePath, newId, (progress) => {
@@ -482,6 +482,14 @@ app.post("/api/tracks/:id/remove-vocals", (req, res) => {
     .catch((e) => {
       jobs.set(jobId, { status: "error", progress: 0, error: `ボーカル除去に失敗しました: ${String(e.message || e)}` });
     });
+});
+
+// 実行中のジョブ一覧 (ページ再読み込み後、進捗表示を復元するために使う)
+app.get("/api/jobs", (req, res) => {
+  const running = [...jobs.entries()]
+    .filter(([, job]) => job.status === "running")
+    .map(([jobId, job]) => ({ jobId, trackId: job.trackId, status: job.status, progress: job.progress }));
+  res.json(running);
 });
 
 // ジョブの進捗確認 (ボーカル除去・将来の非同期処理で共用)
