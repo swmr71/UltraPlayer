@@ -246,7 +246,7 @@ function renderLibrary() {
       <td><input type="text" value="${escapeAttr(t.title)}" data-field="title" data-id="${t.id}" /></td>
       <td><input type="text" value="${escapeAttr(t.author)}" data-field="author" data-id="${t.id}" /></td>
       <td>${t.arranged ? '<span class="badge">BGM化</span> ' : ''}<input type="text" value="${escapeAttr(t.note)}" data-field="note" data-id="${t.id}" /></td>
-      <td><button class="secondary" data-devocal="${t.id}">ボーカル除去</button></td>
+      <td><button class="secondary" data-devocal="${t.id}" ${activeVocalJobs[t.id] ? "disabled" : ""}>${devocalButtonLabel(t.id)}</button></td>
       <td><button class="danger" data-del="${t.id}">削除</button></td>
     `;
     body.appendChild(tr);
@@ -275,57 +275,76 @@ function renderLibrary() {
   });
   body.querySelectorAll("button[data-devocal]").forEach(btn => {
     btn.addEventListener("click", async () => {
+      const trackId = btn.dataset.devocal;
       btn.disabled = true;
-      const original = btn.textContent;
       btn.textContent = "開始中...";
       try {
-        const res = await fetch(`/api/tracks/${btn.dataset.devocal}/remove-vocals`, { method: "POST" });
+        const res = await fetch(`/api/tracks/${trackId}/remove-vocals`, { method: "POST" });
         const data = await res.json();
         if (!res.ok) {
           alert(data.error || "ボーカル除去に失敗しました");
           btn.disabled = false;
-          btn.textContent = original;
+          btn.textContent = "ボーカル除去";
           return;
         }
-        await pollVocalRemovalJob(data.jobId, btn, original);
+        activeVocalJobs[trackId] = { jobId: data.jobId, progress: 0 };
+        pollVocalRemovalJob(trackId, data.jobId);
       } catch (e) {
         alert("ボーカル除去に失敗しました");
         btn.disabled = false;
-        btn.textContent = original;
+        btn.textContent = "ボーカル除去";
       }
     });
   });
   updatePreviewButtons();
 }
 
-function pollVocalRemovalJob(jobId, btn, originalLabel) {
-  return new Promise((resolve) => {
-    const tick = async () => {
-      let job;
-      try {
-        job = await fetch(`/api/jobs/${jobId}`).then(r => r.json());
-      } catch (e) {
-        setTimeout(tick, 1500);
-        return;
-      }
-      if (job.status === "running") {
-        btn.textContent = `処理中... ${job.progress ?? 0}%`;
-        setTimeout(tick, 1000);
-        return;
-      }
-      if (job.status === "error") {
-        alert(job.error || "ボーカル除去に失敗しました");
-        btn.disabled = false;
-        btn.textContent = originalLabel;
-        resolve();
-        return;
-      }
-      // done
-      await refreshLibrary();
-      resolve();
-    };
-    tick();
-  });
+// ------------------------------------------------------------
+// ボーカル除去の進捗管理。実行中ジョブをtrackId単位で保持しておき、
+// 曲の追加/編集などで一覧が再描画(renderLibrary)されてボタンのDOM要素が
+// 作り直されても、進捗表示が消えずに引き継がれるようにする
+// (ボタンのDOM参照を直接持ち回さず、毎回data-devocalで探し直す)。
+// ------------------------------------------------------------
+const activeVocalJobs = {}; // trackId -> { jobId, progress }
+
+function devocalButtonLabel(trackId) {
+  const job = activeVocalJobs[trackId];
+  return job ? `処理中... ${job.progress}%` : "ボーカル除去";
+}
+
+function updateDevocalButton(trackId) {
+  const btn = document.querySelector(`button[data-devocal="${trackId}"]`);
+  if (!btn) return;
+  const job = activeVocalJobs[trackId];
+  btn.disabled = !!job;
+  btn.textContent = devocalButtonLabel(trackId);
+}
+
+function pollVocalRemovalJob(trackId, jobId) {
+  const tick = async () => {
+    let job;
+    try {
+      job = await fetch(`/api/jobs/${jobId}`).then(r => r.json());
+    } catch (e) {
+      setTimeout(tick, 1500);
+      return;
+    }
+    if (job.status === "running") {
+      activeVocalJobs[trackId] = { jobId, progress: job.progress ?? 0 };
+      updateDevocalButton(trackId);
+      setTimeout(tick, 1000);
+      return;
+    }
+    delete activeVocalJobs[trackId];
+    if (job.status === "error") {
+      alert(job.error || "ボーカル除去に失敗しました");
+      updateDevocalButton(trackId);
+      return;
+    }
+    // done
+    await refreshLibrary();
+  };
+  tick();
 }
 
 function renderPlaylistManager() {
