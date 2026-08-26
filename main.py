@@ -56,11 +56,16 @@ import subprocess
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-import cv2
-import mediapipe as mp
 import pygame
-import numpy as np
 from PIL import Image, ImageDraw, ImageFont
+
+# cv2 / mediapipe / numpy はカメラ(--hand-sign)専用で、特にmediapipeの import
+# だけで数秒かかることがある。--hand-sign を使わない起動(既定)を軽くするため、
+# 実際に --hand-sign が指定されたときだけ main() 内で遅延importする
+# (import後はここへ代入されるモジュールレベル変数を、下のdraw_text_ja等が使う)。
+cv2 = None
+mp = None
+np = None
 
 
 # ------------------------------------------------------------
@@ -550,8 +555,21 @@ def load_playlists(track_dir: str) -> dict:
 # ------------------------------------------------------------
 class ProgramController:
     def __init__(self, path: str, player: "BGMPlayer"):
+        if not os.path.exists(path):
+            raise RuntimeError(
+                f"{path} が見つかりません。bgm-library の「行事の次第」で保存するか、"
+                "program.example.json を参考に作成してください"
+            )
         with open(path, "r", encoding="utf-8") as f:
-            self.items = json.load(f)
+            raw = f.read().strip()
+        if not raw:
+            raise RuntimeError(
+                f"{path} が空です。bgm-library の「行事の次第」で演目を追加して保存してください"
+            )
+        try:
+            self.items = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"{path} のJSONが壊れています ({e})") from e
         if not self.items:
             raise RuntimeError(f"{path} に演目がありません")
         self.player = player
@@ -975,7 +993,7 @@ def make_now_playing_server(
 BGM_LIBRARY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bgm-library")
 
 
-def start_bgm_library():
+def start_bgm_library(tracks_dir: str, program_file: str | None):
     server_js = os.path.join(BGM_LIBRARY_DIR, "server.js")
     if not os.path.isfile(server_js):
         return None
@@ -991,8 +1009,17 @@ def start_bgm_library():
         print("       `cd bgm-library && npm install` を実行してください")
         return None
 
+    # main.py の --dir / --program をそのまま bgm-library にも伝える。
+    # bgm-library/.env の TRACKS_DIR / PROGRAM_FILE は env var が既にあると
+    # 上書きしない (dotenvのデフォルト挙動) ため、ここで渡せば .env の手動
+    # 編集を忘れて食い違う事故を防げる。
+    env = os.environ.copy()
+    env["TRACKS_DIR"] = os.path.abspath(tracks_dir)
+    if program_file:
+        env["PROGRAM_FILE"] = os.path.abspath(program_file)
+
     try:
-        proc = subprocess.Popen([node_cmd, "server.js"], cwd=BGM_LIBRARY_DIR)
+        proc = subprocess.Popen([node_cmd, "server.js"], cwd=BGM_LIBRARY_DIR, env=env)
         print("[bgm-library] 自動起動しました (http://localhost:4000)")
         return proc
     except Exception as e:
@@ -1053,13 +1080,26 @@ def main():
     parser.add_argument("--api-port", type=int, default=8787, help="現在再生中の曲情報を返すHTTP APIのポート (0で無効化)")
     parser.add_argument("--program", type=str, default=None, help="行事の次第(演目リスト)を定義したJSONファイル。指定するとNキーで演目を進行できる")
     parser.add_argument("--no-library", action="store_true", help="bgm-library (Node.js) の自動起動をスキップする")
+    parser.add_argument("--profile-startup", action="store_true", help="起動の各ステップの所要時間を計測して表示する")
     args = parser.parse_args()
+
+    _t0 = time.monotonic()
+    _last = [_t0]
+
+    def _mark(label: str):
+        if not args.profile_startup:
+            return
+        now = time.monotonic()
+        print(f"[起動計測] {label}: {now - _last[0]:.2f}s (累計 {now - _t0:.2f}s)")
+        _last[0] = now
 
     bgm_library_proc = None
     if not args.no_library:
-        bgm_library_proc = start_bgm_library()
+        bgm_library_proc = start_bgm_library(args.dir, args.program)
+    _mark("bgm-library 起動")
 
     player = BGMPlayer(args.dir)
+    _mark("トラック読み込み (BGMPlayer)")
     recognizer = GestureRecognizer(cooldown_sec=args.cooldown)
 
     program = None
@@ -1069,6 +1109,7 @@ def main():
             print(f"[PROGRAM] {args.program} を読み込みました ({len(program.items)}演目)")
         except Exception as e:
             print(f"[警告] 次第ファイルを読み込めませんでした: {e}")
+    _mark("次第ファイル読み込み")
 
     command_queue: "queue.Queue[str]" = queue.Queue()
     voice_controller = None
@@ -1080,6 +1121,7 @@ def main():
         except Exception as e:
             print(f"[警告] 音声認識を開始できませんでした: {e}")
             print("       pip install vosk pyaudio を確認してください")
+        _mark("音声認識 (vosk) 初期化")
 
     api_server = None
     api_thread = None
@@ -1092,6 +1134,7 @@ def main():
             print(f"[管理画面] http://127.0.0.1:{args.api_port}/links.html からcontrol.html等を開けます")
         except OSError as e:
             print(f"[警告] APIサーバーを起動できませんでした: {e}")
+    _mark("APIサーバー起動")
 
     status_text = "READY"
 
@@ -1109,6 +1152,12 @@ def main():
                 status_text = apply_command(player, queued_command, prefix="CMD")
 
     if args.hand_sign:
+        global cv2, mp, np
+        import cv2
+        import mediapipe as mp
+        import numpy as np
+        _mark("カメラ/mediapipe 読み込み")
+
         mp_hands = mp.solutions.hands
         mp_drawing = mp.solutions.drawing_utils
 

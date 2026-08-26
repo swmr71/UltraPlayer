@@ -98,6 +98,9 @@ python main.py --dir ./tracks --hand-sign --camera 0 --cooldown 1.0 --voice --ap
 - `--program`: 行事の次第(演目リスト)を定義したJSONファイル。指定すると `N` キーで
   次の演目に進行できる (下記「行事の次第と連動させる」参照)
 - `--no-library`: bgm-library (Node.js) の自動起動をスキップする
+- `--profile-startup`: 起動の各ステップ(bgm-library起動、トラック読み込み、
+  カメラ/mediapipe読み込みなど)にかかった時間を計測してコンソールに表示する。
+  起動が遅いと感じたときの切り分けに使う
 
 ## 行事の次第と連動させる (発表会・学芸会向け)
 
@@ -226,7 +229,10 @@ cp .env.example .env   # 必要に応じて編集 (後述)
   生成し、`(Instrumental)` 付きの新しい曲としてライブラリに追加します(元の曲は
   そのまま残ります)。`pip install demucs`(main.py と同じvenv)が必要です。
   ボタンを押すとすぐ処理が始まり、完了までボタンに進捗(%)が表示されます。
-  NVIDIA GPU(CUDA)が無い環境ではCPU実行になり、曲の長さと同程度〜数倍の
+  モデルは既定で高品質な `htdemucs_ft`(`bgm-library/.env` の `DEMUCS_MODEL` で
+  変更可。速度優先なら `htdemucs`)。実行デバイスは起動時に自動検出され、
+  NVIDIA GPU(CUDA)→ Apple Silicon(MPS)→ CPU の順で使えるものが選ばれます
+  (`DEMUCS_DEVICE` で固定も可)。CPU実行の場合は曲の長さと同程度〜数倍の
   処理時間がかかります(CPUのマルチプロセス並列化は単一トラックではオーバー
   ヘッドの方が大きく逆に遅くなったため採用していません)。
 - 転換用プレイリスト: 名前を付けたプレイリスト(複数曲・並べ替え可)を作成できます

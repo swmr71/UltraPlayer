@@ -16,9 +16,11 @@
  *   利用者側の責任で確認すること。
  * - 登録済みの曲から「ボーカル除去」でDemucs (要 pip install demucs、main.py と
  *   同じvenv) を実行し、インストゥルメンタル版を新しい曲として追加できる。
- *   CPU実行(GPU/CUDA非搭載機では自動でCPUになる)のため曲の長さと同程度〜
- *   数倍の処理時間がかかる。POST /api/tracks/:id/remove-vocals はジョブIDを
- *   即返し、GET /api/jobs/:id をポーリングすると進捗(%)を取得できる。
+ *   モデルは既定で高品質な htdemucs_ft (DEMUCS_MODEL で変更可)。実行デバイスは
+ *   起動時に自動検出 (CUDA > Apple Silicon MPS > CPU の優先順、DEMUCS_DEVICE で
+ *   固定も可)。GPUが無い環境ではCPU実行になり、曲の長さと同程度〜数倍の処理
+ *   時間がかかる。POST /api/tracks/:id/remove-vocals はジョブIDを即返し、
+ *   GET /api/jobs/:id をポーリングすると進捗(%)を取得できる。
  */
 
 require("dotenv").config();
@@ -53,6 +55,38 @@ function resolvePythonCmd() {
   return process.platform === "win32" ? "python" : "python3";
 }
 const PYTHON_CMD = resolvePythonCmd();
+
+// ボーカル除去に使うDemucsのモデル名。既定は高品質な htdemucs_ft (4モデルの
+// アンサンブルで既定の htdemucs より高精度だが約4倍遅い)。処理時間を優先する
+// 場合は .env で DEMUCS_MODEL=htdemucs に戻せる。
+const DEMUCS_MODEL = process.env.DEMUCS_MODEL || "htdemucs_ft";
+
+// 実行デバイス。未指定 (auto) なら起動時に CUDA > Apple Silicon(MPS) > CPU の
+// 優先順で自動検出する。.env の DEMUCS_DEVICE で "cuda"/"mps"/"cpu" に固定も可。
+const DEMUCS_DEVICE_OVERRIDE = process.env.DEMUCS_DEVICE || "";
+let demucsDevice = DEMUCS_DEVICE_OVERRIDE || "cpu";
+
+async function detectDemucsDevice() {
+  if (DEMUCS_DEVICE_OVERRIDE) return DEMUCS_DEVICE_OVERRIDE;
+  try {
+    const { stdout } = await execFileAsync(
+      PYTHON_CMD,
+      [
+        "-c",
+        "import torch,json;" +
+          "mps=bool(getattr(torch.backends,'mps',None) and torch.backends.mps.is_available());" +
+          "print(json.dumps({'cuda': torch.cuda.is_available(), 'mps': mps}))",
+      ],
+      { timeout: 15000 }
+    );
+    const info = JSON.parse(stdout.trim());
+    if (info.cuda) return "cuda";
+    if (info.mps) return "mps";
+  } catch {
+    // torch未インストール等。CPUにフォールバック
+  }
+  return "cpu";
+}
 
 fs.mkdirSync(TRACKS_DIR, { recursive: true });
 
@@ -176,9 +210,9 @@ function createJob() {
 }
 
 // ------------------------------------------------------------
-// AIボーカル除去 (Demucs, htdemucsモデル)
-// このマシンにはNVIDIA GPU(CUDA)が無くCPU実行のみのため、GPUへのオフロードは
-// できない。CPUのマルチプロセス並列化(-j)も試したが、ワーカーごとにモデルを
+// AIボーカル除去 (Demucs, デフォルト htdemucs_ft モデル)
+// 実行デバイスは起動時に自動検出したもの (demucsDevice: cuda/mps/cpu) を使う。
+// CPU実行時はマルチプロセス並列化(-j)も試したが、ワーカーごとにモデルを
 // 再ロードするオーバーヘッドが上回り単一トラックではかえって遅くなったため
 // 採用していない。代わりにDemucsの進捗バー(標準エラー出力)を正規表現でパース
 // してジョブの進捗(0-99%)に反映している。
@@ -193,7 +227,18 @@ function runDemucs(sourcePath, workDir, onProgress) {
   return new Promise((resolve, reject) => {
     const child = spawn(
       PYTHON_CMD,
-      ["-m", "demucs", "--two-stems=vocals", "-o", workDir, sourcePath],
+      [
+        "-m",
+        "demucs",
+        "--two-stems=vocals",
+        "-n",
+        DEMUCS_MODEL,
+        "--device",
+        demucsDevice,
+        "-o",
+        workDir,
+        sourcePath,
+      ],
       { windowsHide: true }
     );
 
@@ -238,7 +283,7 @@ async function removeVocals(sourcePath, newId, onProgress) {
     onProgress(99);
 
     const baseName = path.parse(sourcePath).name;
-    const wavPath = path.join(workDir, "htdemucs", baseName, "no_vocals.wav");
+    const wavPath = path.join(workDir, DEMUCS_MODEL, baseName, "no_vocals.wav");
     if (!fs.existsSync(wavPath)) {
       throw new Error("ボーカル除去は完了しましたが、出力ファイルが見つかりません");
     }
@@ -565,6 +610,10 @@ app.listen(PORT, async () => {
   }
   try {
     await execFileAsync(PYTHON_CMD, ["-m", "demucs", "--help"], { timeout: 15000 });
+    demucsDevice = await detectDemucsDevice();
+    console.log(
+      `[bgm-library] ボーカル除去: モデル=${DEMUCS_MODEL} デバイス=${demucsDevice}${DEMUCS_DEVICE_OVERRIDE ? " (固定)" : " (自動検出)"}`
+    );
   } catch {
     console.log(`[bgm-library] ボーカル除去は無効です ('${PYTHON_CMD} -m demucs' が実行できません。pip install demucs を確認してください)`);
   }

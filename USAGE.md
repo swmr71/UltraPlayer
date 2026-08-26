@@ -32,6 +32,11 @@ Web管理画面から操作できるシステム。このファイルは全機�
 
 `bgm-library` は `main.py` 起動時に子プロセスとして自動的に一緒に起動される
 (`node` と `node_modules` が揃っている場合。`--no-library` で無効化可)。
+自動起動時、`main.py` の `--dir` / `--program` の値が環境変数 `TRACKS_DIR` /
+`PROGRAM_FILE` として bgm-library に渡され、`bgm-library/.env` の値より優先
+される。つまり `--dir` / `--program` にリポジトリ外のフォルダを指定しても、
+`bgm-library/.env` を手動で書き換える必要はない(`.env` の値は `bgm-library`
+を単体起動 (`npm start`) したときだけ使われる)。
 
 `main.py` は `0.0.0.0` で待ち受けているため、同じLAN(ルーター配下)の他端末からも
 `http://(このPCのIP):8787/...` でアクセスできる(認証機構は無いので、信頼できる
@@ -90,6 +95,7 @@ python main.py --dir ./tracks --hand-sign --camera 0 --cooldown 1.0 --voice --ap
 | `--api-port` | `8787` | ローカルAPIのポート。`0` で無効化 |
 | `--program` | なし | 行事の次第JSON。指定すると `N` キー / `/program/advance` で演目を進行できる |
 | `--no-library` | オフ | bgm-library (Node.js) の自動起動をスキップする |
+| `--profile-startup` | オフ | 起動の各ステップの所要時間を計測してコンソールに表示する(起動が遅いときの切り分け用) |
 
 `--hand-sign` を付けない場合、`main.py` はカメラなしのヘッドレスループで動作し、
 `control.html` / 音声 / APIからのコマンドを処理し続ける(`Ctrl+C` で終了)。
@@ -110,10 +116,17 @@ python main.py --dir ./tracks --hand-sign --camera 0 --cooldown 1.0 --voice --ap
    [Demucs](https://github.com/facebookresearch/demucs) でインストゥルメンタル版を
    生成し、`(Instrumental)` 付きの新しい曲として追加(元の曲は残る)。
    要 `pip install demucs`(main.pyと同じvenv)。ボタンを押すと即座に処理が始まり、
-   完了までボタンに `処理中... N%` と進捗が表示される。NVIDIA GPU(CUDA)が
-   無い環境ではCPU実行になり、曲の長さと同程度〜数倍の処理時間がかかる
-   (CPUのマルチプロセス並列化は単一トラックだとオーバーヘッドの方が大きく
-   逆に遅くなるため未使用)。
+   完了までボタンに `処理中... N%` と進捗が表示される。
+
+   - **モデル**: 既定で高品質な `htdemucs_ft`(4モデルのアンサンブルで既定の
+     `htdemucs` より高精度だが約4倍遅い)。`bgm-library/.env` の `DEMUCS_MODEL`
+     で変更可(速度優先なら `htdemucs` に戻せる)。
+   - **実行デバイス**: 起動時に自動検出し、NVIDIA GPU(CUDA)→ Apple Silicon
+     (MPS)→ CPU の優先順で使えるものを選ぶ(起動ログに `ボーカル除去: モデル=...
+     デバイス=...` と表示される)。`.env` の `DEMUCS_DEVICE` に `cuda`/`mps`/`cpu`
+     を指定すると固定できる。CPU実行の場合は曲の長さと同程度〜数倍の処理時間が
+     かかる(CPUのマルチプロセス並列化は単一トラックだとオーバーヘッドの方が
+     大きく逆に遅くなるため未使用)。
 
 ### 各曲のフィールド
 
@@ -333,3 +346,8 @@ CORSヘッダー付き(ブラウザ/OBSから直接fetch可能)。
   起動ログに `yt-dlp が見つかりません` / `demucs' が実行できません` の警告が
   出ていないか確認する。`PYTHON_CMD` / `YT_DLP_CMD` / `FFMPEG_CMD` を `.env` で
   明示指定することもできる。
+- **ボーカル除去がMac(Apple Silicon)のGPUを使ってくれない/遅い**: 起動ログの
+  `ボーカル除去: モデル=... デバイス=...` を確認する。`デバイス=cpu` のままなら
+  `python -c "import torch; print(torch.backends.mps.is_available())"` で
+  そのvenvのtorchがMPS対応か確認する(`False` ならtorchをMPS対応版に入れ直す)。
+  `.env` の `DEMUCS_DEVICE=mps` で強制指定もできる。
