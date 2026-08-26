@@ -339,7 +339,7 @@ function renderPlaylistManager() {
 
     const chips = (pl.trackIds || []).map((id, ci) => {
       const t = libraryById[id];
-      const label = t ? escapeHtml(t.displayTitle) : `(見つかりません: ${escapeHtml(id)})`;
+      const label = t ? escapeHtml(t.title) : `(見つかりません: ${escapeHtml(id)})`;
       return `
         <div class="bgm-chip">
           <span class="muted">${ci + 1}.</span>
@@ -351,7 +351,7 @@ function renderPlaylistManager() {
     }).join("");
 
     const availableOptions = library.map(t =>
-      `<option value="${t.id}">${escapeHtml(t.displayTitle)}</option>`
+      `<option value="${t.id}">${escapeHtml(t.title)}</option>`
     ).join("");
 
     card.innerHTML = `
