@@ -45,6 +45,8 @@
   }
   .playlist-card .row-inline { margin-top: 6px; }
   .playlist-card input[type=text] { width: auto; flex: 1; }
+  button.preview-play { background: #2f8f5b; margin-top: 0; padding: 4px 10px; min-width: 34px; }
+  button.preview-play.playing { background: #b3453f; }
 </style>
 </head>
 <body>
@@ -113,7 +115,7 @@
   <div class="card">
     <table>
       <thead>
-        <tr><th>表示用曲名</th><th>曲名(内部)</th><th>作者</th><th>注記</th><th></th><th></th></tr>
+        <tr><th></th><th>表示用曲名</th><th>曲名(内部)</th><th>作者</th><th>注記</th><th></th><th></th></tr>
       </thead>
       <tbody id="library-body"></tbody>
     </table>
@@ -140,6 +142,53 @@ let library = [];
 let program = [];
 let playlists = [];
 
+// ------------------------------------------------------------
+// 試し聞き (/tracks-file/<filename> を1つの<audio>で再生する。
+// ボタンを押すたびに再生/一時停止をトグルし、別の曲を押すと切り替わる)
+// ------------------------------------------------------------
+const previewAudio = new Audio();
+let previewTrackId = null;
+previewAudio.addEventListener("ended", stopPreview);
+previewAudio.addEventListener("pause", () => {
+  if (previewAudio.currentTime === 0 || previewAudio.ended) stopPreview();
+  else updatePreviewButtons();
+});
+previewAudio.addEventListener("play", updatePreviewButtons);
+
+function updatePreviewButtons() {
+  document.querySelectorAll("button[data-preview]").forEach(btn => {
+    const isCurrent = btn.dataset.preview === previewTrackId && !previewAudio.paused;
+    btn.textContent = isCurrent ? "⏸" : "▶";
+    btn.classList.toggle("playing", isCurrent);
+  });
+}
+
+function stopPreview() {
+  previewAudio.pause();
+  previewAudio.currentTime = 0;
+  previewTrackId = null;
+  updatePreviewButtons();
+}
+
+function togglePreview(id) {
+  const track = library.find(t => t.id === id);
+  if (!track) return;
+  if (previewTrackId === id) {
+    if (previewAudio.paused) {
+      previewAudio.play().catch(() => { alert("再生に失敗しました"); stopPreview(); });
+    } else {
+      previewAudio.pause();
+    }
+    return;
+  }
+  previewAudio.src = `/tracks-file/${encodeURIComponent(track.filename)}`;
+  previewTrackId = id;
+  previewAudio.play().catch(() => {
+    alert("再生に失敗しました");
+    stopPreview();
+  });
+}
+
 async function refreshLibrary() {
   library = await fetch("/api/tracks").then(r => r.json());
   renderLibrary();
@@ -164,6 +213,7 @@ function renderLibrary() {
   for (const t of library) {
     const tr = document.createElement("tr");
     tr.innerHTML = `
+      <td><button class="preview-play" data-preview="${t.id}" type="button" title="試し聞き">▶</button></td>
       <td><input type="text" value="${escapeAttr(t.displayTitle)}" data-field="displayTitle" data-id="${t.id}" /></td>
       <td><input type="text" value="${escapeAttr(t.title)}" data-field="title" data-id="${t.id}" /></td>
       <td><input type="text" value="${escapeAttr(t.author)}" data-field="author" data-id="${t.id}" /></td>
@@ -192,6 +242,9 @@ function renderLibrary() {
       await refreshLibrary();
     });
   });
+  body.querySelectorAll("button[data-preview]").forEach(btn => {
+    btn.addEventListener("click", () => togglePreview(btn.dataset.preview));
+  });
   body.querySelectorAll("button[data-devocal]").forEach(btn => {
     btn.addEventListener("click", async () => {
       btn.disabled = true;
@@ -214,6 +267,7 @@ function renderLibrary() {
       }
     });
   });
+  updatePreviewButtons();
 }
 
 function pollVocalRemovalJob(jobId, btn, originalLabel) {
