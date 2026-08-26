@@ -333,6 +333,9 @@ class BGMPlayer:
         self.index = 0
         self.volume = 0.5
         self.playing = False
+        self.repeat = False  # 通常再生時、曲が終わったら繰り返すかどうか
+        self.restricted = True  # ⏭/⏮ を allowed_ids 内の曲だけに制限するかどうか
+        self.allowed_ids = None  # 制限対象の曲idの集合 (Noneなら制限データ無し=無制限)
         pygame.mixer.music.set_volume(self.volume)
         if self.library:
             self._load_current()
@@ -413,6 +416,9 @@ class BGMPlayer:
             "volume": round(self.volume, 2),
             "index": self.index,
             "total_tracks": len(self.library),
+            "repeat": self.repeat,
+            "restricted": self.restricted,
+            "restricted_active": self.restricted and self.allowed_ids is not None,
             "tracks": [
                 {"id": t["id"], "title": t["displayTitle"], "author": t["author"], "arranged": t["arranged"]}
                 for t in self.library
@@ -436,21 +442,55 @@ class BGMPlayer:
         pygame.mixer.music.stop()
         self.playing = False
 
-    def next_track(self):
+    def tick(self):
+        """毎フレーム呼ぶ想定。曲が自然に終了したときの後処理を行う
+        (リピート有効なら同じ曲を再生し直す。無効ならplayingをFalseにして
+        実際の無音状態と一致させる)。ProgramController側で既に処理される
+        場合(転換中の曲送り)はそちらが先に曲を再生し直すので競合しない。
+        """
+        if not self.playing:
+            return
+        if pygame.mixer.music.get_busy():
+            return
+        if self.repeat:
+            pygame.mixer.music.play()
+        else:
+            self.playing = False
+
+    def toggle_repeat(self):
+        self.repeat = not self.repeat
+
+    def toggle_restricted(self):
+        self.restricted = not self.restricted
+
+    def _navigable_indices(self):
+        """⏭/⏮ で移動してよい曲のインデックス一覧。
+        restricted かつ allowed_ids が設定されていれば、その曲idに限定する。
+        """
+        if self.restricted and self.allowed_ids is not None:
+            return [i for i, t in enumerate(self.library) if t["id"] in self.allowed_ids]
+        return list(range(len(self.library)))
+
+    def _navigate(self, direction: int):
         if not self.library:
             return
-        self.index = (self.index + 1) % len(self.library)
+        candidates = self._navigable_indices()
+        if not candidates:
+            return  # 制限中で、現在の演目のプレイリストに曲が登録されていない
+        if self.index in candidates:
+            pos = (candidates.index(self.index) + direction) % len(candidates)
+        else:
+            pos = 0 if direction > 0 else -1
+        self.index = candidates[pos]
         self._load_current()
         pygame.mixer.music.play()
         self.playing = True
 
+    def next_track(self):
+        self._navigate(1)
+
     def prev_track(self):
-        if not self.library:
-            return
-        self.index = (self.index - 1) % len(self.library)
-        self._load_current()
-        pygame.mixer.music.play()
-        self.playing = True
+        self._navigate(-1)
 
     def volume_up(self):
         self.volume = min(1.0, self.volume + 0.1)
@@ -666,6 +706,18 @@ class ProgramController:
             })
         return result
 
+    def active_playlist_ids(self):
+        """今流してよい曲のidリストを返す (BGMPlayerの⏭/⏮制限に使う)。
+        転換中はそのプレイリスト、それ以外(開始前・上演中)は次に進めると
+        流れる予定のプレイリストを対象にする。
+        """
+        if self.mode == "transition":
+            return list(self.bgm_queue)
+        upcoming_idx = 0 if not self.started else self.current_idx + 1
+        if upcoming_idx < len(self.items):
+            return self._bgm_ids(self.items[upcoming_idx])
+        return []
+
     def admin_status(self) -> dict:
         """管理画面(control.html)向けの詳細ステータス。進行位置・演目一覧に加え、
         今再生できる(転換中)/ 次に進めると再生される(上演中・開始前)曲の
@@ -764,7 +816,10 @@ def make_now_playing_server(
     """
 
     calib_store = CalibStore()
-    VALID_COMMANDS = {"PLAY_PAUSE", "STOP", "NEXT", "PREV", "VOL_UP", "VOL_DOWN"}
+    VALID_COMMANDS = {
+        "PLAY_PAUSE", "STOP", "NEXT", "PREV", "VOL_UP", "VOL_DOWN",
+        "REPEAT_TOGGLE", "RESTRICT_TOGGLE",
+    }
 
     class Handler(BaseHTTPRequestHandler):
         def _send_json(self, obj, status=200):
@@ -944,6 +999,12 @@ def apply_command(player: "BGMPlayer", command: str, prefix: str = "") -> str:
     elif command == "VOL_DOWN":
         player.volume_down()
         return f"[{prefix}] VOL {int(player.volume * 100)}%"
+    elif command == "REPEAT_TOGGLE":
+        player.toggle_repeat()
+        return f"[{prefix}] REPEAT {'ON' if player.repeat else 'OFF'}"
+    elif command == "RESTRICT_TOGGLE":
+        player.toggle_restricted()
+        return f"[{prefix}] RESTRICT {'ON' if player.restricted else 'OFF'}"
     return ""
 
 
@@ -1058,6 +1119,8 @@ def main():
 
                 if program:
                     program.tick()
+                    player.allowed_ids = set(program.active_playlist_ids())
+                player.tick()
 
                 # 画面にステータス表示 (日本語ファイル名も文字化けしないようPILで描画)
                 header_h = 100 if program else 70
@@ -1097,6 +1160,8 @@ def main():
                 drain_command_queue()
                 if program:
                     program.tick()
+                    player.allowed_ids = set(program.active_playlist_ids())
+                player.tick()
                 time.sleep(0.05)
         except KeyboardInterrupt:
             pass

@@ -89,6 +89,8 @@
   #controls button:hover { background: rgba(125,225,255,0.2); }
   #controls button:active { transform: scale(0.96); }
   #controls button.wide { flex: 1 1 100%; }
+  #controls button.toggle-on { border-color: rgba(125,225,255,0.7); background: rgba(125,225,255,0.28); color: #fff; }
+  #controls button.toggle-warn { border-color: rgba(224,69,69,0.6); background: rgba(224,69,69,0.18); color: #ff9d9d; }
 
   #program-card {
     background: rgba(255,255,255,0.03);
@@ -253,6 +255,8 @@
       <button id="btn-next">⏭ 次の曲</button>
       <button id="btn-voldown">🔉 音量-</button>
       <button id="btn-volup">🔊 音量+</button>
+      <button id="btn-repeat" class="wide">🔁 リピート: OFF</button>
+      <button id="btn-restrict" class="wide">🔒 プレイリスト内のみ再生</button>
     </div>
 
     <div id="program-card" style="display:none;">
@@ -439,9 +443,28 @@ async function poll() {
 
     renderPlaylist(player);
     renderProgram(data.program);
+    renderToggles(player);
   } catch (e) {
     connDot.classList.remove("ok");
     connText.textContent = "未接続 (main.py が起動しているか確認してください)";
+  }
+}
+
+const repeatBtn = document.getElementById("btn-repeat");
+const restrictBtn = document.getElementById("btn-restrict");
+
+function renderToggles(player) {
+  repeatBtn.textContent = `🔁 リピート: ${player.repeat ? "ON" : "OFF"}`;
+  repeatBtn.classList.toggle("toggle-on", Boolean(player.repeat));
+
+  if (player.restricted) {
+    restrictBtn.textContent = "🔒 プレイリスト内のみ再生";
+    restrictBtn.classList.add("toggle-on");
+    restrictBtn.classList.remove("toggle-warn");
+  } else {
+    restrictBtn.textContent = "🔓 制限解除中 (全曲再生可)";
+    restrictBtn.classList.add("toggle-warn");
+    restrictBtn.classList.remove("toggle-on");
   }
 }
 
@@ -464,6 +487,8 @@ document.getElementById("btn-prev").addEventListener("click", () => sendCommand(
 document.getElementById("btn-next").addEventListener("click", () => sendCommand("NEXT"));
 document.getElementById("btn-voldown").addEventListener("click", () => sendCommand("VOL_DOWN"));
 document.getElementById("btn-volup").addEventListener("click", () => sendCommand("VOL_UP"));
+document.getElementById("btn-repeat").addEventListener("click", () => sendCommand("REPEAT_TOGGLE"));
+document.getElementById("btn-restrict").addEventListener("click", () => sendCommand("RESTRICT_TOGGLE"));
 
 programAdvanceBtn.addEventListener("click", async () => {
   try {

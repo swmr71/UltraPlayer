@@ -189,13 +189,32 @@ last.fm APIキーは https://www.lastfm.jp/api/account/create で無料取得で
 操作者専用のダッシュボード。**OBSのシーンには絶対に追加しないこと**。
 
 - **NOW PLAYING**: 現在の曲名・再生状態・音量・トラック番号
-- **コントロール**: ▶/⏸(再生/一時停止)・■(停止)・⏮/⏭(前後の曲)・🔉/🔊(音量)
+- **コントロール**: ▶/⏸(再生/一時停止)・■(停止)・⏮/⏭(前後の曲)・🔉/🔊(音量)・
+  🔁 リピート・🔒/🔓 プレイリスト制限(後述)
 - **次第カード** (`--program` 使用時のみ表示): 開始前/上演中/転換中の状態、
-  「戻る (B)」ボタン(戻れない場合は自動的に無効化される)、「次の演目へ (N)」ボタン
+  今流れている(流れる予定の)プレイリストのプレビュー、「戻る (B)」ボタン
+  (戻れない場合は自動的に無効化される)、「次の演目へ (N)」ボタン
 - **PLAYLIST**: ライブラリの全曲を表示、再生中の曲をハイライト。`arranged` な曲には
   `[BGM化]` タグが付く
 - **配信画面の位置調整**: `monitor1.html` / `monitor2.html` の物理的な高さ(cm)と
   上下オフセット(px)をここから遠隔調整する(モニター側は操作不要)
+
+### リピート
+
+🔁ボタンで通常再生(次第の転換以外)の曲末尾ループを切り替える。ONの間は曲が
+終わると同じ曲を繰り返す。行事の次第の転換用プレイリストは元々自動でループする
+仕様なので、これとは独立している。
+
+### プレイリスト制限 (⏮/⏭の範囲を限定)
+
+デフォルトで🔒(制限ON)になっている。この状態では ⏮/⏭ は「今の演目に紐づいた
+転換用プレイリストに登録されている曲」の範囲内でしか動かない
+(転換中ならそのプレイリスト、上演中・開始前なら次に進めると流れる予定の
+プレイリストが対象)。対象のプレイリストに曲が1つも無い場合、⏮/⏭ は何もしない。
+`--program` を指定していない場合はこの制限自体が働かない(演目の概念が無いため)。
+
+誤って無関係な曲へ飛ばないための安全装置だが、🔓ボタンでいつでも解除でき、
+解除中はライブラリの全曲を自由に行き来できる。もう一度押せば制限に戻る。
 
 ## 配信用画面 (monitor1.html / monitor2.html / display.html)
 
@@ -255,9 +274,9 @@ CORSヘッダー付き(ブラウザ/OBSから直接fetch可能)。
 
 | メソッド | パス | 内容 |
 |---|---|---|
-| `GET` | `/now-playing` | 配信画面向け。`--program` 未使用時は `{track: {title, author, arranged, note?}, playing, volume, index, total_tracks, tracks}`。使用時は開始前なら `{mode: "ready", starts_with: "transition"\|"performing", next_item}`、上演中なら `{mode: "performing", current_item}`、転換中なら `{mode: "transition", next_item, bgm: {title, author, arranged, note?}}` |
+| `GET` | `/now-playing` | 配信画面向け。`--program` 未使用時は `{track: {title, author, arranged, note?}, playing, volume, index, total_tracks, repeat, restricted, restricted_active, tracks}`。使用時は開始前なら `{mode: "ready", starts_with: "transition"\|"performing", next_item}`、上演中なら `{mode: "performing", current_item}`、転換中なら `{mode: "transition", next_item, bgm: {title, author, arranged, note?}}` |
 | `GET` | `/admin/status` | 管理画面向け。`{player: <player.status()と同じ>, program: <programがあればadmin_status()、なければnull>}`。`program.admin_status()` は `status()` に `started`, `can_go_back`, `current_idx`, `total_items`, `items`(演目名一覧)を追加したもの。さらに転換中は `current_playlist`(`{id,title,author}` の配列)と `current_playlist_index`、それ以外は `upcoming_playlist`(次に進めると流れる予定のプレイリスト)を含む |
-| `POST` | `/command` | 再生操作。Body: `{"command": "PLAY_PAUSE"\|"STOP"\|"NEXT"\|"PREV"\|"VOL_UP"\|"VOL_DOWN"}`。202で受理、内部のコマンドキューに積まれメインループで実行される |
+| `POST` | `/command` | 再生操作。Body: `{"command": "PLAY_PAUSE"\|"STOP"\|"NEXT"\|"PREV"\|"VOL_UP"\|"VOL_DOWN"\|"REPEAT_TOGGLE"\|"RESTRICT_TOGGLE"}`。202で受理、内部のコマンドキューに積まれメインループで実行される |
 | `POST` | `/program/advance` | 次第を次の演目へ進める(`--program` 未指定時は400) |
 | `POST` | `/program/back` | 直前の `/program/advance` を1つ取り消す(`--program` 未指定時は400) |
 | `GET` | `/calib` | モニター1・2のキャリブレーション状態 `{"1": {heightCm, yOffsetPx}, "2": {...}}` |

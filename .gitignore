@@ -231,3 +231,4 @@ tracks/*.ogg
 tracks/tracks.json
 tracks/playlists.json
 program.json
+calib_state.json
