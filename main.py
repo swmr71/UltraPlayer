@@ -803,20 +803,29 @@ class ProgramController:
         self.playlist_positions = {}
 
     def _bgm_ids(self, item: dict):
-        """転換時に流すBGM(曲idリスト)"""
+        """転換時に流すBGM(曲idリスト)。プレイリストの代わりに曲を1曲だけ
+        直接割り当てる(trackId)こともでき、その場合はその1曲だけのキューになる
+        (プレイリストを作らずに済む単曲指定用)。"""
         playlist_id = item.get("playlistId")
         if playlist_id:
             return list(self.playlists.get(playlist_id, {}).get("trackIds", []))
+        track_id = item.get("trackId")
+        if track_id:
+            return [track_id]
         bgm = item.get("bgm") or []  # 後方互換 (インライン指定)
         if isinstance(bgm, str):
             bgm = [bgm]
         return bgm
 
     def _performing_bgm_ids(self, item: dict):
-        """上演中ずっと流すBGM(曲idリスト)"""
+        """上演中ずっと流すBGM(曲idリスト)。転換用同様、プレイリストの代わりに
+        performingTrackId で曲を1曲だけ直接割り当てられる。"""
         playlist_id = item.get("performingPlaylistId")
         if playlist_id:
             return list(self.playlists.get(playlist_id, {}).get("trackIds", []))
+        track_id = item.get("performingTrackId")
+        if track_id:
+            return [track_id]
         return []
 
     def _playlists_json_mtime(self):

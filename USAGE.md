@@ -183,10 +183,13 @@ last.fm APIキーは https://www.lastfm.jp/api/account/create で無料取得で
 劇や演奏など、BGMを流さずに進行する演目が混ざる行事(発表会・学芸会)向けの機能。
 `bgm-library` の管理画面の「行事の次第」セクションで編集し、`program.json` に保存される。
 
-- 演目を追加し、各演目のドロップダウンから2種類のプレイリストをそれぞれ選んで付け外しできる
-  - **転換に使うプレイリスト**: その演目に「入るとき」(転換中)に流すBGM
-  - **上演中に流すプレイリスト**: その演目が「上演中」の間ずっと流すBGM
+- 演目を追加し、各演目のドロップダウンから2種類のBGMをそれぞれ選んで付け外しできる
+  - **転換に使う曲/プレイリスト**: その演目に「入るとき」(転換中)に流すBGM
+  - **上演中に流す曲/プレイリスト**: その演目が「上演中」の間ずっと流すBGM
     (劇の劇伴・演奏中のBGMなど)
+  - どちらのドロップダウンも「曲(単曲)」グループと「プレイリスト」グループに
+    分かれていて、1曲だけ流したいだけならわざわざプレイリストを作らずに曲を
+    直接選べる(複数曲を順番に流したい/使い回したい場合は従来通りプレイリストを選ぶ)
   - どちらも選ばなければ完全にBGMなしの演目になる
   - 上演中プレイリストには「上演開始と同時にBGMを自動再生する」チェックボックスが
     ある。**デフォルトはOFF**(自動再生しない)で、上演中に切り替わった瞬間は
@@ -409,7 +412,7 @@ last.fm APIキーは https://www.lastfm.jp/api/account/create で無料取得で
 | `PATCH` | `/api/playlists/:id` | プレイリスト編集 (`name`/`trackIds`/`note` の一部) |
 | `DELETE` | `/api/playlists/:id` | プレイリストを削除。行事の次第から参照中なら `warning` を返す |
 | `GET` | `/api/program` | 行事の次第を取得 |
-| `PUT` | `/api/program` | 行事の次第を保存。Body: `[{name, playlistId: 転換用プレイリストid\|null, performingPlaylistId: 上演中用プレイリストid\|null, performingAutoplay: 上演開始と同時に自動再生するか(既定false)}, ...]` の配列 |
+| `PUT` | `/api/program` | 行事の次第を保存。Body: `[{name, playlistId: 転換用プレイリストid\|null, trackId: 転換用の単曲id\|null, performingPlaylistId: 上演中用プレイリストid\|null, performingTrackId: 上演中用の単曲id\|null, performingAutoplay: 上演開始と同時に自動再生するか(既定false)}, ...]` の配列。playlistIdとtrackId(performingPlaylistIdとperformingTrackId)はどちらか一方だけを指定する |
 
 ## bgm-libraryでの編集をmain.py再起動なしで反映する
 

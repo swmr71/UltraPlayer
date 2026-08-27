@@ -640,7 +640,9 @@ app.delete("/api/tracks/:id", asyncRoute(async (req, res) => {
   fs.unlink(path.join(TRACKS_DIR, entry.filename), () => {});
 
   const program = loadProgram();
-  const stillUsed = program.some((item) => item.bgm === entry.id);
+  const stillUsed = program.some((item) =>
+    item.bgm === entry.id || item.trackId === entry.id || item.performingTrackId === entry.id
+  );
   res.json({ deleted: entry.id, warning: stillUsed ? "行事の次第から参照されたままです" : null });
 }));
 
@@ -751,7 +753,9 @@ app.delete("/api/playlists/:id", asyncRoute(async (req, res) => {
   }
 
   const program = loadProgram();
-  const stillUsed = program.some((item) => item.playlistId === req.params.id);
+  const stillUsed = program.some((item) =>
+    item.playlistId === req.params.id || item.performingPlaylistId === req.params.id
+  );
   res.json({ deleted: req.params.id, warning: stillUsed ? "行事の次第から参照されたままです" : null });
 }));
 

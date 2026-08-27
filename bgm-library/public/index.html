@@ -609,23 +609,39 @@ document.getElementById("btn-add-playlist").addEventListener("click", async () =
   await refreshPlaylists();
 });
 
-function renderPlaylistPicker(item, idx, field, playlistById, libraryById, legacyIds) {
-  const options = playlists.map(p =>
-    `<option value="${p.id}" ${item[field] === p.id ? "selected" : ""}>${escapeHtml(p.name)}</option>`
+// プレイリストだけでなく曲単体も直接選べるようにする(わざわざプレイリストを
+// 作らなくても1曲だけ流したい演目に対応するため)。<select>の値は "pl:<id>"
+// (プレイリスト) / "tr:<id>" (単曲) のプレフィックス付きで区別し、選択時に
+// playlistField/trackFieldのどちらか一方だけをセットする(他方はnullにする)。
+function renderBgmPicker(item, idx, playlistField, trackField, playlistById, libraryById, legacyIds) {
+  const selectedValue = item[trackField]
+    ? `tr:${item[trackField]}`
+    : (item[playlistField] ? `pl:${item[playlistField]}` : "");
+
+  const trackOptions = library.map(t =>
+    `<option value="tr:${t.id}" ${selectedValue === `tr:${t.id}` ? "selected" : ""}>${escapeHtml(t.displayTitle)}</option>`
+  ).join("");
+  const playlistOptions = playlists.map(p =>
+    `<option value="pl:${p.id}" ${selectedValue === `pl:${p.id}` ? "selected" : ""}>${escapeHtml(p.name)}</option>`
   ).join("");
 
   let previewHtml;
-  const selected = item[field] ? playlistById[item[field]] : null;
-  if (selected) {
-    const resolvedIds = Array.isArray(selected.sourcePlaylistIds)
-      ? resolvePlaylistTrackIds(playlists, selected.id)
-      : (selected.trackIds || []);
+  const selectedTrack = item[trackField] ? libraryById[item[trackField]] : null;
+  const selectedPlaylist = item[playlistField] ? playlistById[item[playlistField]] : null;
+  if (selectedTrack) {
+    previewHtml = `<div class="playlist-preview">${escapeHtml(selectedTrack.displayTitle)}</div>`;
+  } else if (item[trackField]) {
+    previewHtml = `<div class="playlist-preview empty">(曲が見つかりません: ${escapeHtml(item[trackField])})</div>`;
+  } else if (selectedPlaylist) {
+    const resolvedIds = Array.isArray(selectedPlaylist.sourcePlaylistIds)
+      ? resolvePlaylistTrackIds(playlists, selectedPlaylist.id)
+      : (selectedPlaylist.trackIds || []);
     const titles = resolvedIds
       .map(id => (libraryById[id] ? escapeHtml(libraryById[id].displayTitle) : "(見つかりません)"))
       .join(" → ");
     previewHtml = `<div class="playlist-preview">${titles || "(このプレイリストは空です)"}</div>`;
-  } else if (item[field]) {
-    previewHtml = `<div class="playlist-preview empty">(プレイリストが見つかりません: ${escapeHtml(item[field])})</div>`;
+  } else if (item[playlistField]) {
+    previewHtml = `<div class="playlist-preview empty">(プレイリストが見つかりません: ${escapeHtml(item[playlistField])})</div>`;
   } else if (legacyIds && legacyIds.length) {
     const titles = legacyIds
       .map(id => (libraryById[id] ? escapeHtml(libraryById[id].displayTitle) : "(見つかりません)"))
@@ -636,9 +652,10 @@ function renderPlaylistPicker(item, idx, field, playlistById, libraryById, legac
   }
 
   return `
-    <select data-idx="${idx}" data-field="${field}">
+    <select data-idx="${idx}" data-playlist-field="${playlistField}" data-track-field="${trackField}">
       <option value="">(BGMなし)</option>
-      ${options}
+      <optgroup label="曲(単曲)">${trackOptions}</optgroup>
+      <optgroup label="プレイリスト">${playlistOptions}</optgroup>
     </select>
     ${previewHtml}
   `;
@@ -654,7 +671,7 @@ function renderProgram() {
     const row = document.createElement("div");
     row.className = "program-item";
 
-    const legacyBgm = !item.playlistId && item.bgm
+    const legacyBgm = !item.playlistId && !item.trackId && item.bgm
       ? (Array.isArray(item.bgm) ? item.bgm : [item.bgm])
       : [];
 
@@ -662,10 +679,10 @@ function renderProgram() {
       <span class="muted">#${i + 1}</span>
       <div class="program-item-main">
         <input type="text" value="${escapeAttr(item.name || "")}" data-idx="${i}" data-field="name" placeholder="演目名 (例: 劇『桃太郎』)" />
-        <label class="playlist-picker-label">転換に使うプレイリスト (この演目に入るとき)</label>
-        ${renderPlaylistPicker(item, i, "playlistId", playlistById, libraryById, legacyBgm)}
-        <label class="playlist-picker-label">上演中に流すプレイリスト (この演目の間ずっと)</label>
-        ${renderPlaylistPicker(item, i, "performingPlaylistId", playlistById, libraryById, null)}
+        <label class="playlist-picker-label">転換に使う曲/プレイリスト (この演目に入るとき)</label>
+        ${renderBgmPicker(item, i, "playlistId", "trackId", playlistById, libraryById, legacyBgm)}
+        <label class="playlist-picker-label">上演中に流す曲/プレイリスト (この演目の間ずっと)</label>
+        ${renderBgmPicker(item, i, "performingPlaylistId", "performingTrackId", playlistById, libraryById, null)}
         <label style="display:block;margin-top:6px;">
           <input type="checkbox" data-idx="${i}" data-field="performingAutoplay" style="width:auto;display:inline-block;vertical-align:middle;" ${item.performingAutoplay ? "checked" : ""} />
           上演開始と同時にBGMを自動再生する (未チェック: 頭出しだけして、▶を押すまで鳴らさない)
@@ -684,10 +701,21 @@ function renderProgram() {
       program[idx][field] = el.value;
     });
   });
-  container.querySelectorAll("select[data-field]").forEach(el => {
+  container.querySelectorAll("select[data-playlist-field]").forEach(el => {
     el.addEventListener("change", () => {
-      const idx = Number(el.dataset.idx), field = el.dataset.field;
-      program[idx][field] = el.value || null;
+      const idx = Number(el.dataset.idx);
+      const plField = el.dataset.playlistField, trField = el.dataset.trackField;
+      const val = el.value;
+      if (val.startsWith("tr:")) {
+        program[idx][trField] = val.slice(3);
+        program[idx][plField] = null;
+      } else if (val.startsWith("pl:")) {
+        program[idx][plField] = val.slice(3);
+        program[idx][trField] = null;
+      } else {
+        program[idx][plField] = null;
+        program[idx][trField] = null;
+      }
       renderProgram();
     });
   });
@@ -715,7 +743,7 @@ function renderProgram() {
 }
 
 document.getElementById("btn-add-item").addEventListener("click", () => {
-  program.push({ name: "", playlistId: null, performingPlaylistId: null, performingAutoplay: false });
+  program.push({ name: "", playlistId: null, trackId: null, performingPlaylistId: null, performingTrackId: null, performingAutoplay: false });
   renderProgram();
 });
 
