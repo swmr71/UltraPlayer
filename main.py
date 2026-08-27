@@ -335,6 +335,7 @@ class BGMPlayer:
         self.library = self._load_library(track_dir)
         if not self.library:
             print(f"[警告] {track_dir} に音源ファイルが見つかりません (mp3/wav/ogg)")
+        self._library_mtime = self._tracks_json_mtime()
         self.index = 0
         self.volume = 0.5
         self.playing = False
@@ -393,6 +394,39 @@ class BGMPlayer:
             }
             for p in paths
         ]
+
+    def _tracks_json_mtime(self):
+        path = os.path.join(self.track_dir, "tracks.json")
+        try:
+            return os.path.getmtime(path)
+        except OSError:
+            return None
+
+    def reload_library_if_changed(self):
+        """bgm-libraryでの編集(曲の追加/削除/メタデータ変更)をmain.py再起動
+        無しで反映するため、tracks.jsonの更新日時を見て変わっていれば読み直す。
+        再生中の曲がライブラリ内の位置(index)を基準にしているため、
+        再読み込み後も曲id基準で同じ曲を指し続けるようにインデックスを補正する
+        (見つからなくなっていた場合は範囲内に収める)。
+        """
+        mtime = self._tracks_json_mtime()
+        if mtime is None or mtime == self._library_mtime:
+            return
+        self._library_mtime = mtime
+        current_id = self.library[self.index]["id"] if self.library else None
+        new_library = self._load_library(self.track_dir)
+        if not new_library:
+            return  # 読み込みエラー等で空になった場合は既存のライブラリを維持する
+        self.library = new_library
+        if current_id is not None:
+            for i, t in enumerate(self.library):
+                if t["id"] == current_id:
+                    self.index = i
+                    break
+            else:
+                self.index = min(self.index, len(self.library) - 1)
+        else:
+            self.index = 0
 
     def _load_current(self) -> bool:
         """現在のインデックスの曲をロードする。壊れたファイルなど
@@ -641,7 +675,7 @@ class ProgramController:
             raise RuntimeError(f"{path} に演目がありません")
         self.player = player
         self.playlists = load_playlists(player.track_dir)
-        self._library_by_id = {t["id"]: t for t in player.library}
+        self._playlists_mtime = self._playlists_json_mtime()
 
         self.started = False  # 最初の進行(N)がまだ押されていない状態
         self.current_idx = 0
@@ -673,6 +707,26 @@ class ProgramController:
         if playlist_id:
             return list(self.playlists.get(playlist_id, {}).get("trackIds", []))
         return []
+
+    def _playlists_json_mtime(self):
+        path = os.path.join(self.player.track_dir, "playlists.json")
+        try:
+            return os.path.getmtime(path)
+        except OSError:
+            return None
+
+    def reload_playlists_if_changed(self):
+        """bgm-libraryでプレイリストを編集(曲の追加/並べ替え/結合設定変更等)した
+        内容を、main.py再起動無しで反映するため、playlists.jsonの更新日時を見て
+        変わっていれば読み直す。今流れている曲自体は差し替えないが、次にこの
+        プレイリストが(ループや次の演目への進行で)再生されるときから新しい
+        内容が使われる。
+        """
+        mtime = self._playlists_json_mtime()
+        if mtime is None or mtime == self._playlists_mtime:
+            return
+        self._playlists_mtime = mtime
+        self.playlists = load_playlists(self.player.track_dir)
 
     def _playlist_loops(self, playlist_id) -> bool:
         """指定プレイリストが最後まで流れたら先頭に戻ってループするか。
@@ -857,10 +911,14 @@ class ProgramController:
         return info
 
     def _resolve_tracks(self, track_ids):
-        """曲idのリストを、管理画面表示用の {id, title, author} のリストに変換する"""
+        """曲idのリストを、管理画面表示用の {id, title, author} のリストに変換する。
+        毎回 player.library から引き直すことで、bgm-libraryで曲を追加/編集した
+        直後でも(main.py再起動無しで)反映されるようにしている。
+        """
+        library_by_id = {t["id"]: t for t in self.player.library}
         result = []
         for tid in track_ids:
-            t = self._library_by_id.get(tid)
+            t = library_by_id.get(tid)
             result.append({
                 "id": tid,
                 "title": t["displayTitle"] if t else "(見つかりません)",
@@ -1373,7 +1431,9 @@ def main():
 
                 try:
                     drain_command_queue()
+                    player.reload_library_if_changed()
                     if program:
+                        program.reload_playlists_if_changed()
                         program.tick()
                         player.allowed_ids = list(program.active_playlist_ids())
                     player.tick()
@@ -1419,7 +1479,9 @@ def main():
             while True:
                 try:
                     drain_command_queue()
+                    player.reload_library_if_changed()
                     if program:
+                        program.reload_playlists_if_changed()
                         program.tick()
                         player.allowed_ids = list(program.active_playlist_ids())
                     player.tick()
