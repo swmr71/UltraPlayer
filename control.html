@@ -113,6 +113,9 @@
     background: rgba(125,225,255,0.12); color: #fff; font-weight: 700;
   }
   #program-card .playlist-tracks .track .num { opacity: 0.5; width: 1.5em; flex-shrink: 0; }
+  #program-card .playlist-tracks .track.clickable { cursor: pointer; }
+  #program-card .playlist-tracks .track.clickable:hover { background: rgba(255,255,255,0.08); }
+  #program-card .playlist-tracks .track.clickable.playing:hover { background: rgba(125,225,255,0.2); }
   #program-card .btn-row { display: flex; gap: 8px; margin-top: 12px; }
   #program-card button {
     flex: 1;
@@ -345,6 +348,7 @@ const COMMAND_URL = "/command";
 const PROGRAM_ADVANCE_URL = "/program/advance";
 const PROGRAM_BACK_URL = "/program/back";
 const PROGRAM_RESET_URL = "/program/reset";
+const PROGRAM_PLAY_TRACK_URL = "/program/play-track";
 const CALIB_URL = "/calib";
 const POLL_MS = 700;
 
@@ -392,14 +396,32 @@ function renderProgramPlaylist(program) {
     return;
   }
   programPlaylistBlock.style.display = "";
-  programPlaylistLabel.textContent = program.current_playlist
-    ? "再生中のプレイリスト (今流せる曲)"
+  const clickable = !!program.current_playlist;
+  programPlaylistLabel.textContent = clickable
+    ? "再生中のプレイリスト (今流せる曲。クリックでその曲から再生)"
     : "次に進めると流れるプレイリスト";
   programPlaylistTracks.innerHTML = tracks.map((t, i) => {
-    const playing = program.current_playlist && i === program.current_playlist_index;
+    const playing = clickable && i === program.current_playlist_index;
     const author = t.author ? ` / ${escapeHtml(t.author)}` : "";
-    return `<div class="track${playing ? " playing" : ""}"><span class="num">${i + 1}</span><span>${escapeHtml(t.title)}${author}${playing ? " ▶" : ""}</span></div>`;
+    const attr = clickable ? ` data-play-track="${escapeHtml(t.id)}"` : "";
+    return `<div class="track${playing ? " playing" : ""}${clickable ? " clickable" : ""}"${attr}><span class="num">${i + 1}</span><span>${escapeHtml(t.title)}${author}${playing ? " ▶" : ""}</span></div>`;
   }).join("");
+  if (clickable) {
+    programPlaylistTracks.querySelectorAll("[data-play-track]").forEach(el => {
+      el.addEventListener("click", async () => {
+        try {
+          await fetch(PROGRAM_PLAY_TRACK_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ trackId: el.dataset.playTrack }),
+          });
+          poll();
+        } catch (e) {
+          // 未接続時は poll() 側のエラー表示に任せる
+        }
+      });
+    });
+  }
 }
 
 function renderProgram(program) {

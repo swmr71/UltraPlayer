@@ -861,6 +861,19 @@ class ProgramController:
         self.playlist_positions = {}
         return "[PROGRAM] 開始前の状態にリセットしました"
 
+    def play_track_in_current_playlist(self, track_id: str) -> str:
+        """再生中のプレイリスト内の指定曲へジャンプする
+        (control.htmlのプレイリスト表示をクリックしたときに呼ばれる)。
+        bgm_posもここで合わせておくことで、以降のループ/次への進行が
+        ジャンプ後の位置を基準に続く。
+        """
+        if track_id not in self.bgm_queue:
+            return "[PROGRAM] 今のプレイリストにその曲はありません"
+        if not self.player.play_by_id(track_id):
+            return "[PROGRAM] 曲の再生に失敗しました"
+        self.bgm_pos = self.bgm_queue.index(track_id)
+        return "[PROGRAM] 曲を切り替えました"
+
     def tick(self):
         """再生中のBGM(転換用・上演中用どちらも)が最後まで再生し終わったら
         次の曲へ自動的に進める。末尾まで行ったら先頭に戻ってループする
@@ -951,7 +964,14 @@ class ProgramController:
 
         if self.bgm_queue:
             info["current_playlist"] = self._resolve_tracks(self.bgm_queue)
-            info["current_playlist_index"] = self.bgm_pos
+            # self.bgm_posではなく、実際にplayerが今読み込んでいる曲を優先する。
+            # 制限解除(🔓)中に⏭/⏮でこのプレイリスト外へ移動されるとbgm_posが
+            # 追随せず、ハイライトが実際に鳴っている曲とズレてしまうため。
+            current_track = self.player.current_track()
+            if current_track and current_track["id"] in self.bgm_queue:
+                info["current_playlist_index"] = self.bgm_queue.index(current_track["id"])
+            else:
+                info["current_playlist_index"] = self.bgm_pos
 
         if self.mode != "transition":
             upcoming_idx = 0 if not self.started else self.current_idx + 1
@@ -1151,6 +1171,22 @@ def make_now_playing_server(
                 else:
                     command_queue.put("PROGRAM_RESET")
                     self._send_json({"queued": "PROGRAM_RESET"}, status=202)
+            elif self.path == "/program/play-track":
+                if program is None or command_queue is None:
+                    self._send_json({"error": "program not enabled (--program を指定してください)"}, status=400)
+                else:
+                    try:
+                        length = int(self.headers.get("Content-Length", 0))
+                        raw = self.rfile.read(length) if length else b"{}"
+                        payload = json.loads(raw.decode("utf-8"))
+                        track_id = payload.get("trackId")
+                        if not track_id:
+                            self._send_json({"error": "trackId を指定してください"}, status=400)
+                        else:
+                            command_queue.put(f"PROGRAM_PLAY_TRACK:{track_id}")
+                            self._send_json({"queued": "PROGRAM_PLAY_TRACK"}, status=202)
+                    except Exception as e:
+                        self._send_json({"error": str(e)}, status=400)
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -1381,6 +1417,10 @@ def main():
             elif queued_command == "PROGRAM_RESET":
                 if program:
                     status_text = program.reset()
+            elif queued_command.startswith("PROGRAM_PLAY_TRACK:"):
+                if program:
+                    track_id = queued_command.split(":", 1)[1]
+                    status_text = program.play_track_in_current_playlist(track_id)
             else:
                 status_text = apply_command(player, queued_command, prefix="CMD")
 
