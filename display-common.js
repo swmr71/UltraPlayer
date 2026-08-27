@@ -19,7 +19,19 @@ const appEl = document.getElementById("app");
 const stageEl = document.getElementById("stage");
 const statusBadge = document.getElementById("status-badge");
 const trackName = document.getElementById("track-name");
+const trackSub = document.getElementById("track-sub");
 const connError = document.getElementById("conn-error");
+
+// 作者・「当方でBGM化(編集・二次利用)した音源」の注意書き・自由記述の注記を、
+// 曲名の下に小さく表示するための1行にまとめる (著作権表示・出典明記のため)。
+function formatTrackSub(track) {
+  if (!track) return "";
+  const parts = [];
+  if (track.author) parts.push(track.author);
+  if (track.arranged) parts.push("編集音源");
+  if (track.note) parts.push(track.note);
+  return parts.join(" / ");
+}
 
 const OTHER = MONITOR === 1 ? 2 : 1;
 const state = {
@@ -79,6 +91,7 @@ function layoutStage() {
 
   trackName.style.fontSize = (canonicalFontCm * myPxPerCm) + "px";
   statusBadge.style.fontSize = (canonicalFontCm * myPxPerCm * 0.12) + "px";
+  trackSub.style.fontSize = (canonicalFontCm * myPxPerCm * 0.18) + "px";
 
   fitTrackName(totalWidthPx);
 }
@@ -99,15 +112,17 @@ function extractNowPlaying(data) {
   // 時間帯なので、最初の演目名を出しておく。この分岐が無いと下の返り値に落ちて
   // title が undefined になり、曲名が空欄のままバッジだけ "PAUSED" と出る。
   if (data.mode === "ready") {
-    return { title: data.next_item, statusText: "まもなく開始", playing: false };
+    return { title: data.next_item, statusText: "まもなく開始", playing: false, sub: "" };
   }
   if (data.mode === "performing") {
-    return { title: data.current_item, statusText: "上演中", playing: false };
+    return { title: data.current_item, statusText: "上演中", playing: false, sub: formatTrackSub(data.bgm) };
   }
+  const track = (data.track && typeof data.track === "object") ? data.track : null;
   return {
-    title: (data.track && typeof data.track === "object") ? data.track.title : data.track,
+    title: track ? track.title : data.track,
     statusText: data.playing ? "NOW PLAYING" : "PAUSED",
     playing: Boolean(data.playing),
+    sub: formatTrackSub(track),
   };
 }
 
@@ -131,13 +146,16 @@ function layoutTransition(data) {
   if (MONITOR === 1) {
     trackName.textContent = `Next: ${data.next_item}`;
     trackName.style.fontSize = (heightCm * 0.28 * myPxPerCm) + "px";
+    trackSub.textContent = "";
   } else if (data.bgm) {
-    const author = data.bgm.author ? `/${data.bgm.author}` : "";
-    trackName.textContent = `再生中：${data.bgm.title}${author}`;
+    trackName.textContent = `再生中：${data.bgm.title}`;
     trackName.style.fontSize = (heightCm * 0.08 * myPxPerCm) + "px";
+    trackSub.textContent = formatTrackSub(data.bgm);
+    trackSub.style.fontSize = (heightCm * 0.045 * myPxPerCm) + "px";
   } else {
     trackName.textContent = "(無音転換)";
     trackName.style.fontSize = (heightCm * 0.08 * myPxPerCm) + "px";
+    trackSub.textContent = "";
   }
   statusBadge.textContent = "転換中";
   statusBadge.style.fontSize = (heightCm * 0.03 * myPxPerCm) + "px";
@@ -154,6 +172,7 @@ function render(data) {
   }
   const info = extractNowPlaying(data);
   trackName.textContent = info.title ?? "";
+  trackSub.textContent = info.sub || "";
   statusBadge.textContent = info.statusText;
   appEl.classList.toggle("paused", !info.playing);
   layoutStage();

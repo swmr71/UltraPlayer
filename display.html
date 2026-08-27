@@ -39,6 +39,15 @@
     text-shadow: 0 0 40px rgba(125,225,255,0.5);
     white-space: nowrap;
   }
+  #track-sub {
+    font-size: 2vw;
+    text-align: center;
+    line-height: 1.3;
+    opacity: 0.75;
+    max-width: 90%;
+    margin-top: 1vh;
+  }
+  #track-sub:empty { display: none; }
 
   /* ビジュアライザー的なバー(疑似) */
   #bars {
@@ -76,6 +85,7 @@
 <div id="app">
   <div id="status-badge">STOPPED</div>
   <div id="track-name">-</div>
+  <div id="track-sub"></div>
   <div id="bars"></div>
 </div>
 <div id="conn-error">接続待機中... (main.py が起動しているか確認してください)</div>
@@ -87,8 +97,20 @@ const POLL_MS = 700;
 const appEl = document.getElementById("app");
 const statusBadge = document.getElementById("status-badge");
 const trackName = document.getElementById("track-name");
+const trackSub = document.getElementById("track-sub");
 const connError = document.getElementById("conn-error");
 const barsEl = document.getElementById("bars");
+
+// 作者・「当方でBGM化(編集・二次利用)した音源」の注意書き・自由記述の注記を、
+// 曲名の下に小さく表示するための1行にまとめる (著作権表示・出典明記のため)。
+function formatTrackSub(track) {
+  if (!track) return "";
+  const parts = [];
+  if (track.author) parts.push(track.author);
+  if (track.arranged) parts.push("編集音源");
+  if (track.note) parts.push(track.note);
+  return parts.join(" / ");
+}
 
 // 疑似ビジュアライザー用バーを生成
 const BAR_COUNT = 24;
@@ -115,22 +137,24 @@ function fitTrackName() {
 function extractNowPlaying(data) {
   if (data.mode === "transition") {
     return data.bgm
-      ? { title: data.bgm.title, statusText: "転換中", playing: true }
-      : { title: "(無音転換)", statusText: "転換中", playing: false };
+      ? { title: data.bgm.title, statusText: "転換中", playing: true, sub: formatTrackSub(data.bgm) }
+      : { title: "(無音転換)", statusText: "転換中", playing: false, sub: "" };
   }
   // 未開始 (Nをまだ一度も押していない)。開演前で客席からスクリーンが見えている
   // 時間帯なので、最初の演目名を出しておく。この分岐が無いと下の返り値に落ちて
   // title が undefined になり、曲名が空欄のままバッジだけ "PAUSED" と出る。
   if (data.mode === "ready") {
-    return { title: data.next_item, statusText: "まもなく開始", playing: false };
+    return { title: data.next_item, statusText: "まもなく開始", playing: false, sub: "" };
   }
   if (data.mode === "performing") {
-    return { title: data.current_item, statusText: "上演中", playing: false };
+    return { title: data.current_item, statusText: "上演中", playing: false, sub: formatTrackSub(data.bgm) };
   }
+  const track = (data.track && typeof data.track === "object") ? data.track : null;
   return {
-    title: (data.track && typeof data.track === "object") ? data.track.title : data.track,
+    title: track ? track.title : data.track,
     statusText: data.playing ? "NOW PLAYING" : "PAUSED",
     playing: Boolean(data.playing),
+    sub: formatTrackSub(track),
   };
 }
 
@@ -143,6 +167,7 @@ async function poll() {
 
     const info = extractNowPlaying(data);
     trackName.textContent = info.title ?? "";
+    trackSub.textContent = info.sub || "";
     statusBadge.textContent = info.statusText;
     appEl.classList.toggle("paused", !info.playing);
 
