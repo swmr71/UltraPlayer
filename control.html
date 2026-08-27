@@ -133,16 +133,16 @@
   }
   #program-card button.back-btn:hover { background: rgba(255,255,255,0.1); }
   #program-card button:disabled { opacity: 0.4; cursor: default; }
+  #program-card .reset-row { display: flex; justify-content: flex-end; margin-top: 6px; }
   #program-card button.reset-btn {
-    flex: 1 1 100%;
-    margin-top: 8px;
-    border-color: rgba(255,120,120,0.35);
-    background: rgba(255,120,120,0.08);
+    flex: 0 0 auto;
+    border-color: rgba(255,120,120,0.3);
+    background: transparent;
     color: #ff9d9d;
-    font-size: 12px;
-    padding: 7px;
+    font-size: 11px;
+    padding: 4px 8px;
   }
-  #program-card button.reset-btn:hover { background: rgba(255,120,120,0.18); }
+  #program-card button.reset-btn:hover { background: rgba(255,120,120,0.12); }
 
   #playlist { display: flex; flex-direction: column; gap: 6px; }
   .track-row {
@@ -190,6 +190,7 @@
   }
   .field-row {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 10px;
     margin-bottom: 10px;
@@ -208,6 +209,7 @@
   }
   .stepper {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 6px;
   }
@@ -280,7 +282,9 @@
       <div class="btn-row">
         <button class="back-btn" id="btn-program-back">戻る (B)</button>
         <button id="btn-program-advance">次の演目へ (N)</button>
-        <button class="reset-btn" id="btn-program-reset">↺ 最初からにリセット (リハーサル後の本番前に)</button>
+      </div>
+      <div class="reset-row">
+        <button class="reset-btn" id="btn-program-reset" title="リハーサル後、本番前に進行状態を最初から(未開始)にリセットします">↺ 最初からにリセット</button>
       </div>
     </div>
 
