@@ -680,6 +680,25 @@ class BGMPlayer:
                 return True
         return False
 
+    def load_by_id(self, track_id: str) -> bool:
+        """曲idを指定してロードだけ行い、再生はしない
+        (上演中BGMの「自動再生しない」設定用。一時停止状態にしておき、
+        操作者が▶を押した時点で toggle_play_pause() が先頭から再生を始める)。
+        """
+        for i, t in enumerate(self.library):
+            if t["id"] == track_id:
+                self.index = i
+                if not self._load_current():
+                    self.playing = False
+                    self._elapsed_started_at = None
+                    return False
+                self.playing = False
+                self.paused = True
+                self._elapsed_base = 0.0
+                self._elapsed_started_at = None
+                return True
+        return False
+
 
 # ------------------------------------------------------------
 # 行事の次第(演目リスト)を読み込み・管理するための補助
@@ -858,13 +877,15 @@ class ProgramController:
         if self.active_playlist_id and self.bgm_queue:
             self.playlist_positions[self.active_playlist_id] = (self.bgm_pos + 1) % len(self.bgm_queue)
 
-    def _play_queue(self, track_ids, playlist_id):
+    def _play_queue(self, track_ids, playlist_id, autoplay=True):
         self.bgm_queue = track_ids
         self.bgm_pos = self.playlist_positions.get(playlist_id, 0) % len(track_ids) if playlist_id else 0
         self.active_playlist_id = playlist_id
         self.active_playlist_loops = self._playlist_loops(playlist_id)
-        if not self.player.play_by_id(self.bgm_queue[self.bgm_pos]):
-            print(f"[警告] ライブラリに該当曲が見つかりません (id={self.bgm_queue[self.bgm_pos]})")
+        track_id = self.bgm_queue[self.bgm_pos]
+        ok = self.player.play_by_id(track_id) if autoplay else self.player.load_by_id(track_id)
+        if not ok:
+            print(f"[警告] ライブラリに該当曲が見つかりません (id={track_id})")
 
     def _start_transition(self, target_idx: int) -> str:
         """転換中に入る。転換用プレイリストが割り当てられてなければ
@@ -889,8 +910,13 @@ class ProgramController:
     def _start_performing(self, idx: int) -> str:
         item = self.items[idx]
         performing_ids = self._performing_bgm_ids(item)
+        # performingAutoplay: 上演中BGMを転換直後に自動再生するか。
+        # デフォルトはFalse(自動再生しない)。曲だけ頭出ししておき、
+        # 操作者が任意のタイミングで▶を押すまで鳴らさない
+        # (演目によっては開始と同時に鳴らしたくない場合があるため)。
+        autoplay = bool(item.get("performingAutoplay"))
         if performing_ids:
-            self._play_queue(performing_ids, item.get("performingPlaylistId"))
+            self._play_queue(performing_ids, item.get("performingPlaylistId"), autoplay=autoplay)
         else:
             self.player.stop()
             self.bgm_queue = []
@@ -899,7 +925,12 @@ class ProgramController:
         self.current_idx = idx
         self.target_idx = None
         self.mode = "performing"
-        suffix = " (BGMあり)" if performing_ids else ""
+        if not performing_ids:
+            suffix = ""
+        elif autoplay:
+            suffix = " (BGMあり・自動再生)"
+        else:
+            suffix = " (BGMあり・手動再生待ち)"
         return f"[PROGRAM] 上演開始: {item['name']}{suffix}"
 
     def advance(self) -> str:
@@ -940,7 +971,16 @@ class ProgramController:
             self.player.stop()
             return "[PROGRAM] 開始前に戻りました"
         if self.bgm_queue:
-            self.player.play_by_id(self.bgm_queue[self.bgm_pos])
+            track_id = self.bgm_queue[self.bgm_pos]
+            # 上演中に戻る場合は、進んだとき同様 performingAutoplay に従う
+            # (自動再生しない設定の演目に戻って、勝手に鳴り出さないように)。
+            autoplay = True
+            if self.mode == "performing":
+                autoplay = bool(self.items[self.current_idx].get("performingAutoplay"))
+            if autoplay:
+                self.player.play_by_id(track_id)
+            else:
+                self.player.load_by_id(track_id)
         else:
             self.player.stop()
         if self.mode == "transition":

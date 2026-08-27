@@ -666,6 +666,10 @@ function renderProgram() {
         ${renderPlaylistPicker(item, i, "playlistId", playlistById, libraryById, legacyBgm)}
         <label class="playlist-picker-label">上演中に流すプレイリスト (この演目の間ずっと)</label>
         ${renderPlaylistPicker(item, i, "performingPlaylistId", playlistById, libraryById, null)}
+        <label style="display:block;margin-top:6px;">
+          <input type="checkbox" data-idx="${i}" data-field="performingAutoplay" style="width:auto;display:inline-block;vertical-align:middle;" ${item.performingAutoplay ? "checked" : ""} />
+          上演開始と同時にBGMを自動再生する (未チェック: 頭出しだけして、▶を押すまで鳴らさない)
+        </label>
       </div>
       <button class="secondary" data-up="${i}" type="button">↑</button>
       <button class="secondary" data-down="${i}" type="button">↓</button>
@@ -674,7 +678,7 @@ function renderProgram() {
     container.appendChild(row);
   });
 
-  container.querySelectorAll("input[data-field]").forEach(el => {
+  container.querySelectorAll("input[type=text][data-field]").forEach(el => {
     el.addEventListener("input", () => {
       const idx = Number(el.dataset.idx), field = el.dataset.field;
       program[idx][field] = el.value;
@@ -685,6 +689,12 @@ function renderProgram() {
       const idx = Number(el.dataset.idx), field = el.dataset.field;
       program[idx][field] = el.value || null;
       renderProgram();
+    });
+  });
+  container.querySelectorAll("input[type=checkbox][data-field]").forEach(el => {
+    el.addEventListener("change", () => {
+      const idx = Number(el.dataset.idx), field = el.dataset.field;
+      program[idx][field] = el.checked;
     });
   });
   container.querySelectorAll("button[data-remove]").forEach(btn => {
@@ -705,7 +715,7 @@ function renderProgram() {
 }
 
 document.getElementById("btn-add-item").addEventListener("click", () => {
-  program.push({ name: "", playlistId: null, performingPlaylistId: null });
+  program.push({ name: "", playlistId: null, performingPlaylistId: null, performingAutoplay: false });
   renderProgram();
 });
 

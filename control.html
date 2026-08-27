@@ -492,7 +492,7 @@ function renderProgramList(program) {
   }).join("");
 }
 
-function renderProgram(program) {
+function renderProgram(program, playerPlaying) {
   renderProgramList(program);
   if (!program) {
     programCard.style.display = "none";
@@ -524,7 +524,8 @@ function renderProgram(program) {
     programItem.textContent = program.current_item;
     if (program.bgm) {
       const author = program.bgm.author ? ` / ${program.bgm.author}` : "";
-      programSub.textContent = `${program.current_idx + 1} / ${program.total_items} 演目 - 再生中BGM: ${program.bgm.title}${author}`;
+      const waiting = playerPlaying === false ? " (手動再生待ち: ▶を押すと再生開始)" : "";
+      programSub.textContent = `${program.current_idx + 1} / ${program.total_items} 演目 - 再生中BGM: ${program.bgm.title}${author}${waiting}`;
     } else {
       programSub.textContent = `${program.current_idx + 1} / ${program.total_items} 演目`;
     }
@@ -578,7 +579,7 @@ async function poll() {
     }
 
     renderPlaylist(player);
-    renderProgram(data.program);
+    renderProgram(data.program, player.playing);
     renderToggles(player);
   } catch (e) {
     connDot.classList.remove("ok");
