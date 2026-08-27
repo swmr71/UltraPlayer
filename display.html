@@ -40,7 +40,7 @@
     white-space: nowrap;
   }
   #track-sub {
-    font-size: 2vw;
+    font-size: 3.8vw;
     text-align: center;
     line-height: 1.3;
     opacity: 0.75;
@@ -90,6 +90,13 @@ function formatTrackSub(track) {
   return parts.join(" / ");
 }
 
+// 上演中は主題が演目名になり曲名自体が画面から消えるため、説明欄には
+// 曲名を先頭に足して「曲名 / 作者 / 編集音源 / 注記」の形にする。
+function formatBgmLine(track) {
+  if (!track) return "";
+  return [track.title, formatTrackSub(track)].filter(Boolean).join(" / ");
+}
+
 function fitTrackName() {
   const maxWidth = appEl.clientWidth * 0.94;
   trackName.style.fontSize = "";
@@ -119,7 +126,7 @@ function extractNowPlaying(data) {
     return { title: data.next_item, statusText: "まもなく開始", playing: false, sub: "" };
   }
   if (data.mode === "performing") {
-    return { title: data.current_item, statusText: "上演中", playing: false, sub: formatTrackSub(data.bgm) };
+    return { title: data.current_item, statusText: "上演中", playing: false, sub: formatBgmLine(data.bgm) };
   }
   const track = (data.track && typeof data.track === "object") ? data.track : null;
   return {

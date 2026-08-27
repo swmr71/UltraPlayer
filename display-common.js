@@ -33,6 +33,13 @@ function formatTrackSub(track) {
   return parts.join(" / ");
 }
 
+// 上演中は主題が演目名になり曲名自体が画面から消えるため、説明欄には
+// 曲名を先頭に足して「曲名 / 作者 / 編集音源 / 注記」の形にする。
+function formatBgmLine(track) {
+  if (!track) return "";
+  return [track.title, formatTrackSub(track)].filter(Boolean).join(" / ");
+}
+
 const OTHER = MONITOR === 1 ? 2 : 1;
 const state = {
   1: { heightCm: null, yOffsetPx: 0, innerHeightPx: window.innerHeight, innerWidthPx: window.innerWidth },
@@ -91,7 +98,7 @@ function layoutStage() {
 
   trackName.style.fontSize = (canonicalFontCm * myPxPerCm) + "px";
   statusBadge.style.fontSize = (canonicalFontCm * myPxPerCm * 0.12) + "px";
-  trackSub.style.fontSize = (canonicalFontCm * myPxPerCm * 0.18) + "px";
+  trackSub.style.fontSize = (canonicalFontCm * myPxPerCm * 0.35) + "px";
 
   fitTrackName(totalWidthPx);
 }
@@ -115,7 +122,7 @@ function extractNowPlaying(data) {
     return { title: data.next_item, statusText: "まもなく開始", playing: false, sub: "" };
   }
   if (data.mode === "performing") {
-    return { title: data.current_item, statusText: "上演中", playing: false, sub: formatTrackSub(data.bgm) };
+    return { title: data.current_item, statusText: "上演中", playing: false, sub: formatBgmLine(data.bgm) };
   }
   const track = (data.track && typeof data.track === "object") ? data.track : null;
   return {
