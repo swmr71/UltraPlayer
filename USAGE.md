@@ -194,6 +194,8 @@ last.fm APIキーは https://www.lastfm.jp/api/account/create で無料取得で
 `main.py --program program.json` で起動すると、`N` キー(または `control.html` の
 「次の演目へ」ボタン、または `POST /program/advance`)で進行できる。`B` キー
 (または「戻る」ボタン、`POST /program/back`)で直前の操作を1つ取り消せる。
+`N`/`B` キーは `control.html` を開いたブラウザ上で押しても効く(入力欄に
+フォーカスがある間は無視される。`--hand-sign` のカメラ窓側でも別途効く)。
 
 - **開始前 → 進める**: 必ずまず演目1への「転換中」になる。転換用プレイリストが
   割り当てられていればそのBGMを再生し、割り当てが無ければ**無音のまま**転換中に

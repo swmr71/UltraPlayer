@@ -621,6 +621,24 @@ programResetBtn.addEventListener("click", async () => {
   }
 });
 
+// N/Bキーのショートカット。ボタンに "(N)"/"(B)" と表示してるが、実はブラウザ側では
+// 何もキーを拾ってなかった(--hand-sign のカメラ窓の中でのcv2キー入力とは別物)ため、
+// control.html を操作の中心にしてる場合はキーが「効かない」状態になっていた。
+document.addEventListener("keydown", (e) => {
+  if (e.ctrlKey || e.altKey || e.metaKey) return;
+  const tag = (e.target && e.target.tagName) || "";
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+  if (programCard.style.display === "none") return;
+  const key = e.key.toLowerCase();
+  if (key === "n") {
+    e.preventDefault();
+    if (!programAdvanceBtn.disabled) programAdvanceBtn.click();
+  } else if (key === "b") {
+    e.preventDefault();
+    if (!programBackBtn.disabled) programBackBtn.click();
+  }
+});
+
 timeTrack.addEventListener("click", async (e) => {
   if (knownDurationSec == null) return; // 長さ不明の曲はシーク位置を計算できない
   const rect = timeTrack.getBoundingClientRect();
