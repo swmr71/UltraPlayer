@@ -148,19 +148,23 @@ function layoutTransition(data) {
     trackName.style.fontSize = (heightCm * 0.28 * myPxPerCm) + "px";
     trackName.style.color = "";
     trackSub.textContent = "";
+    statusBadge.style.visibility = "visible";
   } else if (data.bgm) {
     trackName.textContent = `再生中：${data.bgm.title}`;
     trackName.style.fontSize = (heightCm * 0.08 * myPxPerCm) + "px";
     trackName.style.color = "";
     trackSub.textContent = formatTrackSub(data.bgm);
     trackSub.style.fontSize = (heightCm * 0.045 * myPxPerCm) + "px";
+    statusBadge.style.visibility = "visible";
   } else {
     // 無音転換: 流す曲が無く画面がほぼ空になってしまうので、状態が一目で
     // 分かるよう「転換中」自体を(バッジと同じ水色で)大きく表示する。
+    // 上のバッジも同じ文字なので二重に見えないよう隠す。
     trackName.textContent = "転換中";
     trackName.style.fontSize = (heightCm * 0.28 * myPxPerCm) + "px";
     trackName.style.color = "#7de1ff";
     trackSub.textContent = "";
+    statusBadge.style.visibility = "hidden";
   }
   statusBadge.textContent = "転換中";
   statusBadge.style.fontSize = (heightCm * 0.03 * myPxPerCm) + "px";
@@ -179,6 +183,7 @@ function render(data) {
   trackName.textContent = info.title ?? "";
   trackSub.textContent = info.sub || "";
   statusBadge.textContent = info.statusText;
+  statusBadge.style.visibility = "visible";
   appEl.classList.toggle("paused", !info.playing);
   layoutStage();
 }
