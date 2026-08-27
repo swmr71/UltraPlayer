@@ -505,9 +505,10 @@ function renderPlaylistManager() {
   container.querySelectorAll("input[data-pl-combined]").forEach(el => {
     el.addEventListener("change", async () => {
       const pl = playlists[Number(el.dataset.plIdx)];
-      // オフに戻すときは sourcePlaylistIds を空にして通常のプレイリストに戻す。
       // オンにするときは(曲がまだ空でも)空配列を送って結合モードの表示に切り替える。
-      await savePlaylistSources(pl.id, el.checked ? (pl.sourcePlaylistIds || []) : []);
+      // オフに戻すときはnullを送ってsourcePlaylistIds自体を消す(空配列[]を
+      // 送ると「結合だが中身が空」と区別できず、チェックを外せなくなるため)。
+      await savePlaylistSources(pl.id, el.checked ? (pl.sourcePlaylistIds || []) : null);
     });
   });
   container.querySelectorAll("select[data-pl-add-source]").forEach(el => {
