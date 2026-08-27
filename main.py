@@ -330,6 +330,11 @@ class VoiceController:
         self._stop_flag.set()
 
 
+# 曲を切り替えるときのフェードアウト/フェードインの長さ(ミリ秒)。
+# 上演中BGMの切り替え(ProgramController.tick()等)だけは0を渡してフェード無しにする。
+DEFAULT_FADE_MS = 400
+
+
 # ------------------------------------------------------------
 # BGMプレイヤー本体
 # ------------------------------------------------------------
@@ -621,7 +626,22 @@ class BGMPlayer:
             return [index_by_id[tid] for tid in self.allowed_ids if tid in index_by_id]
         return list(range(len(self.library)))
 
-    def _navigate(self, direction: int):
+    def _fadeout_current(self, fade_ms: int):
+        """曲を切り替える前に、鳴っている(または一時停止中の)曲をフェードアウトする。
+        pygame/SDL_mixerは音声ストリームを1本しか持てず本当のクロスフェードは
+        できないため、フェードアウト→無音→次の曲をフェードイン、の疑似クロスフェード
+        にしている。fadeout()は呼んだ瞬間に返る非同期処理なので、完了を待たずに
+        次の曲をロードすると今のフェードが中断されてしまう。そのため完了まで
+        (fade_ms分だけ)ここでブロックしてから戻る。
+        """
+        if fade_ms <= 0:
+            return
+        if not (self.playing or self.paused):
+            return  # 何も鳴っていない(初回再生など)ならフェードアウトの必要は無い
+        pygame.mixer.music.fadeout(fade_ms)
+        time.sleep(fade_ms / 1000)
+
+    def _navigate(self, direction: int, fade_ms: int = DEFAULT_FADE_MS):
         if not self.library:
             return
         candidates = self._navigable_indices()
@@ -631,12 +651,13 @@ class BGMPlayer:
             pos = (candidates.index(self.index) + direction) % len(candidates)
         else:
             pos = 0 if direction > 0 else -1
+        self._fadeout_current(fade_ms)
         # 壊れたファイル等で読み込みに失敗したら、無限ループしないよう
         # 候補の数だけ試して次へスキップする(全滅なら諦めて無音のまま止める)。
         for _ in range(len(candidates)):
             self.index = candidates[pos]
             if self._load_current():
-                pygame.mixer.music.play()
+                pygame.mixer.music.play(fade_ms=fade_ms)
                 self.playing = True
                 self.paused = False
                 self._elapsed_base = 0.0
@@ -646,11 +667,11 @@ class BGMPlayer:
         self.playing = False
         self._elapsed_started_at = None
 
-    def next_track(self):
-        self._navigate(1)
+    def next_track(self, fade_ms: int = DEFAULT_FADE_MS):
+        self._navigate(1, fade_ms)
 
-    def prev_track(self):
-        self._navigate(-1)
+    def prev_track(self, fade_ms: int = DEFAULT_FADE_MS):
+        self._navigate(-1, fade_ms)
 
     def volume_up(self):
         self.volume = min(1.0, self.volume + 0.1)
@@ -660,19 +681,22 @@ class BGMPlayer:
         self.volume = max(0.0, self.volume - 0.1)
         pygame.mixer.music.set_volume(self.volume)
 
-    def play_by_id(self, track_id: str) -> bool:
+    def play_by_id(self, track_id: str, fade_ms: int = DEFAULT_FADE_MS) -> bool:
         """曲idを指定して再生する (行事プログラムの転換BGM用)。
         ファイルが壊れている等でロードに失敗した場合はFalseを返す
         (呼び出し側で「見つかりません」と同じ扱いで警告される)。
+        fade_ms>0 なら曲の切り替えをフェードアウト→フェードインする
+        (呼び出し側は上演中BGMの切り替えでは0を渡し、フェード無しにする)。
         """
         for i, t in enumerate(self.library):
             if t["id"] == track_id:
                 self.index = i
+                self._fadeout_current(fade_ms)
                 if not self._load_current():
                     self.playing = False
                     self._elapsed_started_at = None
                     return False
-                pygame.mixer.music.play()
+                pygame.mixer.music.play(fade_ms=fade_ms)
                 self.playing = True
                 self.paused = False
                 self._elapsed_base = 0.0
@@ -886,13 +910,13 @@ class ProgramController:
         if self.active_playlist_id and self.bgm_queue:
             self.playlist_positions[self.active_playlist_id] = (self.bgm_pos + 1) % len(self.bgm_queue)
 
-    def _play_queue(self, track_ids, playlist_id, autoplay=True):
+    def _play_queue(self, track_ids, playlist_id, autoplay=True, fade_ms=DEFAULT_FADE_MS):
         self.bgm_queue = track_ids
         self.bgm_pos = self.playlist_positions.get(playlist_id, 0) % len(track_ids) if playlist_id else 0
         self.active_playlist_id = playlist_id
         self.active_playlist_loops = self._playlist_loops(playlist_id)
         track_id = self.bgm_queue[self.bgm_pos]
-        ok = self.player.play_by_id(track_id) if autoplay else self.player.load_by_id(track_id)
+        ok = self.player.play_by_id(track_id, fade_ms=fade_ms) if autoplay else self.player.load_by_id(track_id)
         if not ok:
             print(f"[警告] ライブラリに該当曲が見つかりません (id={track_id})")
 
@@ -925,7 +949,8 @@ class ProgramController:
         # (演目によっては開始と同時に鳴らしたくない場合があるため)。
         autoplay = bool(item.get("performingAutoplay"))
         if performing_ids:
-            self._play_queue(performing_ids, item.get("performingPlaylistId"), autoplay=autoplay)
+            # 上演中BGMの切り替えはフェードしない(転換用BGMのみフェードする)。
+            self._play_queue(performing_ids, item.get("performingPlaylistId"), autoplay=autoplay, fade_ms=0)
         else:
             self.player.stop()
             self.bgm_queue = []
@@ -986,8 +1011,9 @@ class ProgramController:
             autoplay = True
             if self.mode == "performing":
                 autoplay = bool(self.items[self.current_idx].get("performingAutoplay"))
+            fade_ms = 0 if self.mode == "performing" else DEFAULT_FADE_MS
             if autoplay:
-                self.player.play_by_id(track_id)
+                self.player.play_by_id(track_id, fade_ms=fade_ms)
             else:
                 self.player.load_by_id(track_id)
         else:
@@ -1022,7 +1048,8 @@ class ProgramController:
         """
         if track_id not in self.bgm_queue:
             return "[PROGRAM] 今のプレイリストにその曲はありません"
-        if not self.player.play_by_id(track_id):
+        fade_ms = 0 if self.mode == "performing" else DEFAULT_FADE_MS
+        if not self.player.play_by_id(track_id, fade_ms=fade_ms):
             return "[PROGRAM] 曲の再生に失敗しました"
         self.bgm_pos = self.bgm_queue.index(track_id)
         return "[PROGRAM] 曲を切り替えました"
@@ -1045,12 +1072,14 @@ class ProgramController:
             return
         if pygame.mixer.music.get_busy():
             return
+        # 上演中BGMの自動進行はフェードしない(転換用BGMのみフェードする)。
+        fade_ms = 0 if self.mode == "performing" else DEFAULT_FADE_MS
         if self.player.repeat:
             # リピートONのときはプレイリストを進めず同じ曲を繰り返す。
             # (BGMPlayer.tick()のリピート処理は、ここで先に次の曲を再生してしまうと
             #  get_busy()がTrueになって到達しない。control.htmlの🔁ボタンが
             #  プレイリスト再生中だけ無反応になるのを防ぐため、ここで面倒を見る)
-            self.player.play_by_id(self.bgm_queue[self.bgm_pos])
+            self.player.play_by_id(self.bgm_queue[self.bgm_pos], fade_ms=fade_ms)
             return
         if not self.active_playlist_loops and self.bgm_pos + 1 >= len(self.bgm_queue):
             self.player.stop()
@@ -1059,7 +1088,7 @@ class ProgramController:
             self.active_playlist_id = None
             return
         self.bgm_pos = (self.bgm_pos + 1) % len(self.bgm_queue)
-        self.player.play_by_id(self.bgm_queue[self.bgm_pos])
+        self.player.play_by_id(self.bgm_queue[self.bgm_pos], fade_ms=fade_ms)
 
     def status(self) -> dict:
         if not self.started:
@@ -1591,7 +1620,7 @@ def stop_bgm_library(proc):
         proc.kill()
 
 
-def apply_command(player: "BGMPlayer", command: str, prefix: str = "") -> str:
+def apply_command(player: "BGMPlayer", command: str, prefix: str = "", program: "ProgramController" = None) -> str:
     """ジェスチャー・音声どちらから来たコマンドも同じ処理にまとめる"""
     if command == "PLAY_PAUSE":
         player.toggle_play_pause()
@@ -1601,10 +1630,13 @@ def apply_command(player: "BGMPlayer", command: str, prefix: str = "") -> str:
         player.stop()
         return f"[{prefix}] STOP"
     elif command == "NEXT":
-        player.next_track()
+        # 上演中BGMの切り替えはフェードしない(それ以外はフェードする)。
+        fade_ms = 0 if (program and program.mode == "performing") else DEFAULT_FADE_MS
+        player.next_track(fade_ms=fade_ms)
         return f"[{prefix}] NEXT -> {player.current_name()}"
     elif command == "PREV":
-        player.prev_track()
+        fade_ms = 0 if (program and program.mode == "performing") else DEFAULT_FADE_MS
+        player.prev_track(fade_ms=fade_ms)
         return f"[{prefix}] PREV -> {player.current_name()}"
     elif command == "VOL_UP":
         player.volume_up()
@@ -1729,7 +1761,7 @@ def main():
                 except ValueError:
                     pass
             else:
-                status_text = apply_command(player, queued_command, prefix="CMD")
+                status_text = apply_command(player, queued_command, prefix="CMD", program=program)
 
     if args.hand_sign:
         global cv2, mp, np
@@ -1770,7 +1802,7 @@ def main():
                     stable_gesture = recognizer.stabilize(gesture)
 
                     if recognizer.fire(stable_gesture):
-                        status_text = apply_command(player, stable_gesture, prefix="HAND")
+                        status_text = apply_command(player, stable_gesture, prefix="HAND", program=program)
                 else:
                     recognizer.stabilize(None)
                     recognizer.fire(None)
