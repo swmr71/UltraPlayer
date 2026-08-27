@@ -62,6 +62,21 @@
   }
   #index-line { margin-top: 6px; color: #999; font-size: 13px; }
 
+  #time-wrap { margin-top: 12px; }
+  #time-label {
+    display: flex; justify-content: space-between;
+    font-size: 12px; color: #999; margin-bottom: 6px;
+    font-variant-numeric: tabular-nums;
+  }
+  #time-track {
+    width: 100%; height: 5px; background: rgba(255,255,255,0.08);
+    border-radius: 3px; overflow: hidden;
+  }
+  #time-fill {
+    height: 100%; background: linear-gradient(90deg, #9fd6a8, #7de1ff);
+    width: 0%; transition: width 0.4s linear;
+  }
+
   #volume-wrap { margin-top: 16px; }
   #volume-label {
     display: flex; justify-content: space-between;
@@ -248,6 +263,10 @@
       <div id="status-badge">STOPPED</div>
       <div id="track-name">-</div>
       <div id="index-line"></div>
+      <div id="time-wrap" style="display:none;">
+        <div id="time-label"><span id="time-elapsed">0:00</span><span id="time-duration"></span></div>
+        <div id="time-track"><div id="time-fill"></div></div>
+      </div>
       <div id="volume-wrap">
         <div id="volume-label"><span>VOLUME</span><span id="volume-value">50%</span></div>
         <div id="volume-track"><div id="volume-fill"></div></div>
@@ -355,6 +374,10 @@ const POLL_MS = 700;
 const statusBadge = document.getElementById("status-badge");
 const trackName = document.getElementById("track-name");
 const indexLine = document.getElementById("index-line");
+const timeWrap = document.getElementById("time-wrap");
+const timeElapsedEl = document.getElementById("time-elapsed");
+const timeDurationEl = document.getElementById("time-duration");
+const timeFill = document.getElementById("time-fill");
 const volumeFill = document.getElementById("volume-fill");
 const volumeValue = document.getElementById("volume-value");
 const playlistEl = document.getElementById("playlist");
@@ -373,6 +396,14 @@ const programPlaylistTracks = document.getElementById("program-playlist-tracks")
 
 function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function formatTime(sec) {
+  if (sec == null || !Number.isFinite(sec)) return null;
+  sec = Math.max(0, Math.round(sec));
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
 }
 
 function renderPlaylist(player) {
@@ -477,6 +508,22 @@ async function poll() {
       indexLine.textContent = `Track ${player.index + 1} / ${player.total_tracks}`;
     } else {
       indexLine.textContent = "";
+    }
+
+    const elapsedSec = typeof player.elapsed === "number" ? player.elapsed : null;
+    const durationSec = (player.track && typeof player.track === "object") ? player.track.durationSec : null;
+    if (elapsedSec != null) {
+      timeWrap.style.display = "";
+      timeElapsedEl.textContent = formatTime(elapsedSec);
+      if (durationSec != null) {
+        timeDurationEl.textContent = formatTime(durationSec);
+        timeFill.style.width = `${Math.min(100, (elapsedSec / Math.max(durationSec, 0.001)) * 100)}%`;
+      } else {
+        timeDurationEl.textContent = "";
+        timeFill.style.width = "0%";
+      }
+    } else {
+      timeWrap.style.display = "none";
     }
 
     if (typeof player.volume === "number") {

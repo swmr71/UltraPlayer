@@ -250,7 +250,9 @@ last.fm APIキーは https://www.lastfm.jp/api/account/create で無料取得で
 
 操作者専用のダッシュボード。**OBSのシーンには絶対に追加しないこと**。
 
-- **NOW PLAYING**: 現在の曲名・再生状態・音量・トラック番号
+- **NOW PLAYING**: 現在の曲名・再生状態・音量・トラック番号・再生時間
+  (経過時間 / 曲の長さ。長さは`bgm-library`が`ffprobe`で取得済みの曲のみ表示され、
+  未取得の曲は経過時間のみになる)
 - **コントロール**: ▶/⏸(再生/一時停止)・■(停止)・⏮/⏭(前後の曲)・🔉/🔊(音量)・
   🔁 リピート・🔒/🔓 プレイリスト制限(後述)
 - **次第カード** (`--program` 使用時のみ表示): 開始前/上演中/転換中の状態、
@@ -338,7 +340,7 @@ CORSヘッダー付き(ブラウザ/OBSから直接fetch可能)。
 
 | メソッド | パス | 内容 |
 |---|---|---|
-| `GET` | `/now-playing` | 配信画面向け。`--program` 未使用時は `{track: {title, author, arranged, note?}, playing, volume, index, total_tracks, repeat, restricted, restricted_active, tracks}`。使用時は開始前なら `{mode: "ready", starts_with: "transition"\|"performing", next_item}`、上演中なら `{mode: "performing", current_item, bgm?: {title, author, arranged, note?}}`(上演中プレイリストがある演目のみ `bgm` を含む)、転換中なら `{mode: "transition", next_item, bgm: {title, author, arranged, note?}}` |
+| `GET` | `/now-playing` | 配信画面向け。`--program` 未使用時は `{track: {title, author, arranged, note?, durationSec?}, playing, volume, index, total_tracks, repeat, restricted, restricted_active, elapsed, tracks}`。`elapsed`は現在の曲の再生経過秒数、`durationSec`は`bgm-library`が取得済みの場合のみ含まれる。使用時は開始前なら `{mode: "ready", starts_with: "transition"\|"performing", next_item}`、上演中なら `{mode: "performing", current_item, bgm?: {title, author, arranged, note?}}`(上演中プレイリストがある演目のみ `bgm` を含む)、転換中なら `{mode: "transition", next_item, bgm: {title, author, arranged, note?}}` |
 | `GET` | `/admin/status` | 管理画面向け。`{player: <player.status()と同じ>, program: <programがあればadmin_status()、なければnull>}`。`program.admin_status()` は `status()` に `started`, `can_go_back`, `current_idx`, `total_items`, `items`(演目名一覧)を追加したもの。さらに転換中は `current_playlist`(`{id,title,author}` の配列)と `current_playlist_index`、それ以外は `upcoming_playlist`(次に進めると流れる予定のプレイリスト)を含む |
 | `POST` | `/command` | 再生操作。Body: `{"command": "PLAY_PAUSE"\|"STOP"\|"NEXT"\|"PREV"\|"VOL_UP"\|"VOL_DOWN"\|"REPEAT_TOGGLE"\|"RESTRICT_TOGGLE"}`。202で受理、内部のコマンドキューに積まれメインループで実行される |
 | `POST` | `/program/advance` | 次第を次の演目へ進める(`--program` 未指定時は400) |

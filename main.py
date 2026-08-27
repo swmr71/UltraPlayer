@@ -371,6 +371,7 @@ class BGMPlayer:
                         "author": e.get("author", ""),
                         "arranged": bool(e.get("arranged", False)),
                         "note": e.get("note", ""),
+                        "durationSec": e.get("durationSec"),  # bgm-libraryがffprobeで取得しキャッシュしたもの
                     })
                 return library
             except Exception as e:
@@ -459,7 +460,16 @@ class BGMPlayer:
         info = {"title": track["displayTitle"], "author": track["author"], "arranged": track["arranged"]}
         if track["note"]:
             info["note"] = track["note"]
+        if track.get("durationSec") is not None:
+            info["durationSec"] = track["durationSec"]
         return info
+
+    def elapsed_sec(self) -> float:
+        """現在の曲の再生経過秒数 (再生してない/停止直後は0)。
+        pygame.mixer.music.get_pos()は未再生/停止直後に-1を返すため0扱いにする。
+        """
+        pos_ms = pygame.mixer.music.get_pos()
+        return pos_ms / 1000.0 if pos_ms and pos_ms > 0 else 0.0
 
     def status(self) -> dict:
         """現在の再生状態をJSON化しやすい辞書で返す (外部API公開用)"""
@@ -472,6 +482,7 @@ class BGMPlayer:
             "repeat": self.repeat,
             "restricted": self.restricted,
             "restricted_active": self.restricted and self.allowed_ids is not None,
+            "elapsed": round(self.elapsed_sec(), 1),
             "tracks": [
                 {"id": t["id"], "title": t["displayTitle"], "author": t["author"], "arranged": t["arranged"]}
                 for t in self.library
