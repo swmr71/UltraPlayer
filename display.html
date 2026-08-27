@@ -118,6 +118,12 @@ function extractNowPlaying(data) {
       ? { title: data.bgm.title, statusText: "転換中", playing: true }
       : { title: "(無音転換)", statusText: "転換中", playing: false };
   }
+  // 未開始 (Nをまだ一度も押していない)。開演前で客席からスクリーンが見えている
+  // 時間帯なので、最初の演目名を出しておく。この分岐が無いと下の返り値に落ちて
+  // title が undefined になり、曲名が空欄のままバッジだけ "PAUSED" と出る。
+  if (data.mode === "ready") {
+    return { title: data.next_item, statusText: "まもなく開始", playing: false };
+  }
   if (data.mode === "performing") {
     return { title: data.current_item, statusText: "上演中", playing: false };
   }
@@ -136,7 +142,7 @@ async function poll() {
     connError.classList.remove("show");
 
     const info = extractNowPlaying(data);
-    trackName.textContent = info.title;
+    trackName.textContent = info.title ?? "";
     statusBadge.textContent = info.statusText;
     appEl.classList.toggle("paused", !info.playing);
 

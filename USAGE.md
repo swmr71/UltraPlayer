@@ -340,12 +340,25 @@ last.fm APIキーは https://www.lastfm.jp/api/account/create で無料取得で
 
 ## main.py ローカルAPI リファレンス
 
-ベースURL: `http://127.0.0.1:8787` (`--api-port` で変更可)。全レスポンスはJSON、
-CORSヘッダー付き(ブラウザ/OBSから直接fetch可能)。
+ベースURL: `http://127.0.0.1:8787` (`--api-port` で変更可)。全レスポンスはJSON。
+
+参照系(`GET`)は `Access-Control-Allow-Origin: *` 付きで、他オリジンのOBSや自作
+ダッシュボードからも直接fetchできる。
+
+更新系(`POST`)には次の制約がある(他サイトを開いているだけで再生を止められる
+といったCSRFを防ぐため)。
+
+- ブラウザから呼ぶ場合、`Origin` が `Host` と一致している必要がある。
+  LAN内の別端末から `http://(このPCのIP):8787/control.html` を開いた場合も
+  一致するので、そのまま動く。一致しないと `403` を返す。
+- ボディを取るエンドポイント(`/command` `/seek` `/calib` `/program/play-track`)は
+  `Content-Type: application/json` が必須(無いと `415`)。ボディ上限は64KB(超過は `413`)。
+- `curl` など `Origin` を送らないクライアントからは従来どおり呼べる。
+  ただし上記のボディを取るエンドポイントでは `-H 'Content-Type: application/json'` が必要。
 
 | メソッド | パス | 内容 |
 |---|---|---|
-| `GET` | `/now-playing` | 配信画面向け。`--program` 未使用時は `{track: {title, author, arranged, note?, durationSec?}, playing, volume, index, total_tracks, repeat, restricted, restricted_active, elapsed, tracks}`。`elapsed`は現在の曲の再生経過秒数、`durationSec`は`bgm-library`が取得済みの場合のみ含まれる。使用時は開始前なら `{mode: "ready", starts_with: "transition"\|"performing", next_item}`、上演中なら `{mode: "performing", current_item, bgm?: {title, author, arranged, note?}}`(上演中プレイリストがある演目のみ `bgm` を含む)、転換中なら `{mode: "transition", next_item, bgm: {title, author, arranged, note?}}` |
+| `GET` | `/now-playing` | 配信画面向け。`--program` 未使用時は `{track: {title, author, arranged, note?, durationSec?}, playing, volume, index, total_tracks, repeat, restricted, elapsed, tracks}`。`elapsed`は現在の曲の再生経過秒数、`durationSec`は`bgm-library`が取得済みの場合のみ含まれる。使用時は開始前なら `{mode: "ready", starts_with: "transition"\|"performing", next_item}`、上演中なら `{mode: "performing", current_item, bgm?: {title, author, arranged, note?}}`(上演中プレイリストがある演目のみ `bgm` を含む)、転換中なら `{mode: "transition", next_item, bgm: {title, author, arranged, note?}}` |
 | `GET` | `/admin/status` | 管理画面向け。`{player: <player.status()と同じ>, program: <programがあればadmin_status()、なければnull>}`。`program.admin_status()` は `status()` に `started`, `can_go_back`, `current_idx`, `total_items`, `items`(演目名一覧)を追加したもの。さらに転換中は `current_playlist`(`{id,title,author}` の配列)と `current_playlist_index`、それ以外は `upcoming_playlist`(次に進めると流れる予定のプレイリスト)を含む |
 | `POST` | `/command` | 再生操作。Body: `{"command": "PLAY_PAUSE"\|"STOP"\|"NEXT"\|"PREV"\|"VOL_UP"\|"VOL_DOWN"\|"REPEAT_TOGGLE"\|"RESTRICT_TOGGLE"}`。202で受理、内部のコマンドキューに積まれメインループで実行される |
 | `POST` | `/program/advance` | 次第を次の演目へ進める(`--program` 未指定時は400) |
@@ -359,6 +372,9 @@ CORSヘッダー付き(ブラウザ/OBSから直接fetch可能)。
 ## bgm-library API リファレンス
 
 ベースURL: `http://127.0.0.1:4000` (`.env` の `PORT` で変更可)。
+既定では `0.0.0.0` で待ち受けるため、LAN内の他端末からも
+`http://(このPCのIP):4000` で開ける(起動時のログに実際のURLが出る)。
+ローカル限定にしたい場合は `.env` に `HOST=127.0.0.1` を指定する。
 
 | メソッド | パス | 内容 |
 |---|---|---|
