@@ -338,9 +338,13 @@ class BGMPlayer:
         self.index = 0
         self.volume = 0.5
         self.playing = False
+        # pygame.mixer.music.get_busy() は一時停止中もFalseを返すため、
+        # 「一時停止/停止で意図的に音を止めた」のか「曲が自然に終わった」のかを
+        # tick()側で区別するために使う (paused=Trueの間は自然終了扱いしない)。
+        self.paused = False
         self.repeat = False  # 通常再生時、曲が終わったら繰り返すかどうか
         self.restricted = True  # ⏭/⏮ を allowed_ids 内の曲だけに制限するかどうか
-        self.allowed_ids = None  # 制限対象の曲idの集合 (Noneなら制限データ無し=無制限)
+        self.allowed_ids = None  # 制限対象の曲idのリスト (Noneなら制限データ無し=無制限、順序はプレイリストの再生順)
         pygame.mixer.music.set_volume(self.volume)
         if self.library:
             self._load_current()
@@ -446,6 +450,7 @@ class BGMPlayer:
         if self.playing:
             pygame.mixer.music.pause()
             self.playing = False
+            self.paused = True
         else:
             try:
                 if pygame.mixer.music.get_pos() == -1:
@@ -453,13 +458,16 @@ class BGMPlayer:
                 else:
                     pygame.mixer.music.unpause()
                 self.playing = True
+                self.paused = False
             except Exception as e:
                 print(f"[警告] 再生に失敗しました: {e}")
                 self.playing = False
+                self.paused = False
 
     def stop(self):
         pygame.mixer.music.stop()
         self.playing = False
+        self.paused = True
 
     def tick(self):
         """毎フレーム呼ぶ想定。曲が自然に終了したときの後処理を行う
@@ -488,10 +496,13 @@ class BGMPlayer:
 
     def _navigable_indices(self):
         """⏭/⏮ で移動してよい曲のインデックス一覧。
-        restricted かつ allowed_ids が設定されていれば、その曲idに限定する。
+        restricted かつ allowed_ids が設定されていれば、その曲idに限定し、
+        ライブラリ全体の並び順ではなく allowed_ids (プレイリストの再生順)
+        の並び順で返す (でないと⏭/⏮がプレイリストの順番を無視してしまう)。
         """
         if self.restricted and self.allowed_ids is not None:
-            return [i for i, t in enumerate(self.library) if t["id"] in self.allowed_ids]
+            index_by_id = {t["id"]: i for i, t in enumerate(self.library)}
+            return [index_by_id[tid] for tid in self.allowed_ids if tid in index_by_id]
         return list(range(len(self.library)))
 
     def _navigate(self, direction: int):
@@ -511,6 +522,7 @@ class BGMPlayer:
             if self._load_current():
                 pygame.mixer.music.play()
                 self.playing = True
+                self.paused = False
                 return
             pos = (pos + direction) % len(candidates)
         self.playing = False
@@ -542,6 +554,7 @@ class BGMPlayer:
                     return False
                 pygame.mixer.music.play()
                 self.playing = True
+                self.paused = False
                 return True
         return False
 
@@ -799,8 +812,16 @@ class ProgramController:
         次の曲へ自動的に進める。末尾まで行ったら先頭に戻ってループする
         (プレイリストの「ループ」設定がOFFなら、最後まで行ったところで
         無音のまま止める)。メインループから毎フレーム呼び出す想定。
+
+        pygame.mixer.music.get_busy() は一時停止中もFalseを返すため、
+        player.paused (再生/一時停止ボタンや停止ジェスチャーで意図的に
+        止めた状態) のときは「曲が自然に終わった」と誤判定しないよう、
+        ここで進行しないようにする (でないと一時停止した瞬間に次の曲へ
+        勝手に進んでしまう)。
         """
         if not self.bgm_queue:
+            return
+        if self.player.paused:
             return
         if pygame.mixer.music.get_busy():
             return
@@ -1354,7 +1375,7 @@ def main():
                     drain_command_queue()
                     if program:
                         program.tick()
-                        player.allowed_ids = set(program.active_playlist_ids())
+                        player.allowed_ids = list(program.active_playlist_ids())
                     player.tick()
                 except Exception as e:
                     # 本番中にここで想定外の例外(壊れたファイル等)が飛んでも
@@ -1400,7 +1421,7 @@ def main():
                     drain_command_queue()
                     if program:
                         program.tick()
-                        player.allowed_ids = set(program.active_playlist_ids())
+                        player.allowed_ids = list(program.active_playlist_ids())
                     player.tick()
                 except Exception as e:
                     # 本番中にここで想定外の例外(壊れたファイル等)が飛んでも
