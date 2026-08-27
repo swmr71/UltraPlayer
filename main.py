@@ -346,6 +346,11 @@ class BGMPlayer:
         self.repeat = False  # 通常再生時、曲が終わったら繰り返すかどうか
         self.restricted = True  # ⏭/⏮ を allowed_ids 内の曲だけに制限するかどうか
         self.allowed_ids = None  # 制限対象の曲idのリスト (Noneなら制限データ無し=無制限、順序はプレイリストの再生順)
+        # 再生経過秒数の自前管理。pygame.mixer.music.get_pos()はseek(set_pos)後も
+        # 実際の再生位置に追従せず、最初にplay()した時刻からの経過時間を返し続ける
+        # だけなので、シーク機能のためにここで基準値+開始時刻から計算する。
+        self._elapsed_base = 0.0        # 一時停止中/直近シーク時点での経過秒数
+        self._elapsed_started_at = None  # 上記基準からの計測開始wall clock時刻 (Noneなら停止/一時停止中)
         pygame.mixer.music.set_volume(self.volume)
         if self.library:
             self._load_current()
@@ -465,11 +470,26 @@ class BGMPlayer:
         return info
 
     def elapsed_sec(self) -> float:
-        """現在の曲の再生経過秒数 (再生してない/停止直後は0)。
-        pygame.mixer.music.get_pos()は未再生/停止直後に-1を返すため0扱いにする。
+        """現在の曲の再生経過秒数 (再生してない/停止直後は0)。"""
+        if self._elapsed_started_at is not None:
+            return self._elapsed_base + (time.time() - self._elapsed_started_at)
+        return self._elapsed_base
+
+    def seek(self, seconds: float):
+        """曲の再生位置を指定秒数に移動する (シークバー用)。
+        pygame/SDL_mixerの制約でファイル形式によっては効かない/不正確なことが
+        あるため、失敗しても例外は出さず警告だけにする。
         """
-        pos_ms = pygame.mixer.music.get_pos()
-        return pos_ms / 1000.0 if pos_ms and pos_ms > 0 else 0.0
+        if not self.library:
+            return
+        seconds = max(0.0, seconds)
+        try:
+            pygame.mixer.music.set_pos(seconds)
+        except Exception as e:
+            print(f"[警告] シークに失敗しました (このファイル形式では非対応の可能性があります): {e}")
+            return
+        self._elapsed_base = seconds
+        self._elapsed_started_at = time.time() if self.playing else None
 
     def status(self) -> dict:
         """現在の再生状態をJSON化しやすい辞書で返す (外部API公開用)"""
@@ -496,23 +516,30 @@ class BGMPlayer:
             pygame.mixer.music.pause()
             self.playing = False
             self.paused = True
+            self._elapsed_base = self.elapsed_sec()
+            self._elapsed_started_at = None
         else:
             try:
                 if pygame.mixer.music.get_pos() == -1:
                     pygame.mixer.music.play()
+                    self._elapsed_base = 0.0
                 else:
                     pygame.mixer.music.unpause()
                 self.playing = True
                 self.paused = False
+                self._elapsed_started_at = time.time()
             except Exception as e:
                 print(f"[警告] 再生に失敗しました: {e}")
                 self.playing = False
                 self.paused = False
+                self._elapsed_started_at = None
 
     def stop(self):
         pygame.mixer.music.stop()
         self.playing = False
         self.paused = True
+        self._elapsed_base = 0.0
+        self._elapsed_started_at = None
 
     def tick(self):
         """毎フレーム呼ぶ想定。曲が自然に終了したときの後処理を行う
@@ -527,11 +554,15 @@ class BGMPlayer:
         if self.repeat:
             try:
                 pygame.mixer.music.play()
+                self._elapsed_base = 0.0
+                self._elapsed_started_at = time.time()
             except Exception as e:
                 print(f"[警告] リピート再生に失敗しました: {e}")
                 self.playing = False
+                self._elapsed_started_at = None
         else:
             self.playing = False
+            self._elapsed_started_at = None
 
     def toggle_repeat(self):
         self.repeat = not self.repeat
@@ -568,9 +599,12 @@ class BGMPlayer:
                 pygame.mixer.music.play()
                 self.playing = True
                 self.paused = False
+                self._elapsed_base = 0.0
+                self._elapsed_started_at = time.time()
                 return
             pos = (pos + direction) % len(candidates)
         self.playing = False
+        self._elapsed_started_at = None
 
     def next_track(self):
         self._navigate(1)
@@ -596,10 +630,13 @@ class BGMPlayer:
                 self.index = i
                 if not self._load_current():
                     self.playing = False
+                    self._elapsed_started_at = None
                     return False
                 pygame.mixer.music.play()
                 self.playing = True
                 self.paused = False
+                self._elapsed_base = 0.0
+                self._elapsed_started_at = time.time()
                 return True
         return False
 
@@ -1164,6 +1201,19 @@ def make_now_playing_server(
                         self._send_json({"queued": command}, status=202)
                 except Exception as e:
                     self._send_json({"error": str(e)}, status=400)
+            elif self.path == "/seek":
+                if command_queue is None:
+                    self._send_json({"error": "command queue unavailable"}, status=503)
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", 0))
+                    raw = self.rfile.read(length) if length else b"{}"
+                    payload = json.loads(raw.decode("utf-8"))
+                    seconds = float(payload.get("seconds"))
+                    command_queue.put(f"SEEK:{seconds}")
+                    self._send_json({"queued": "SEEK"}, status=202)
+                except Exception as e:
+                    self._send_json({"error": str(e)}, status=400)
             elif self.path == "/program/advance":
                 if program is None or command_queue is None:
                     self._send_json({"error": "program not enabled (--program を指定してください)"}, status=400)
@@ -1432,6 +1482,11 @@ def main():
                 if program:
                     track_id = queued_command.split(":", 1)[1]
                     status_text = program.play_track_in_current_playlist(track_id)
+            elif queued_command.startswith("SEEK:"):
+                try:
+                    player.seek(float(queued_command.split(":", 1)[1]))
+                except ValueError:
+                    pass
             else:
                 status_text = apply_command(player, queued_command, prefix="CMD")
 

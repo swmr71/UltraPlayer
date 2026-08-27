@@ -72,6 +72,8 @@
     width: 100%; height: 5px; background: rgba(255,255,255,0.08);
     border-radius: 3px; overflow: hidden;
   }
+  #time-track.seekable { cursor: pointer; height: 10px; }
+  #time-track.seekable:hover { background: rgba(255,255,255,0.16); }
   #time-fill {
     height: 100%; background: linear-gradient(90deg, #9fd6a8, #7de1ff);
     width: 0%; transition: width 0.4s linear;
@@ -368,6 +370,7 @@ const PROGRAM_ADVANCE_URL = "/program/advance";
 const PROGRAM_BACK_URL = "/program/back";
 const PROGRAM_RESET_URL = "/program/reset";
 const PROGRAM_PLAY_TRACK_URL = "/program/play-track";
+const SEEK_URL = "/seek";
 const CALIB_URL = "/calib";
 const POLL_MS = 700;
 
@@ -378,6 +381,8 @@ const timeWrap = document.getElementById("time-wrap");
 const timeElapsedEl = document.getElementById("time-elapsed");
 const timeDurationEl = document.getElementById("time-duration");
 const timeFill = document.getElementById("time-fill");
+const timeTrack = document.getElementById("time-track");
+let knownDurationSec = null; // 直近pollで判明している曲の長さ(秒)。シーク計算に使う
 const volumeFill = document.getElementById("volume-fill");
 const volumeValue = document.getElementById("volume-value");
 const playlistEl = document.getElementById("playlist");
@@ -512,15 +517,18 @@ async function poll() {
 
     const elapsedSec = typeof player.elapsed === "number" ? player.elapsed : null;
     const durationSec = (player.track && typeof player.track === "object") ? player.track.durationSec : null;
+    knownDurationSec = durationSec;
     if (elapsedSec != null) {
       timeWrap.style.display = "";
       timeElapsedEl.textContent = formatTime(elapsedSec);
       if (durationSec != null) {
         timeDurationEl.textContent = formatTime(durationSec);
         timeFill.style.width = `${Math.min(100, (elapsedSec / Math.max(durationSec, 0.001)) * 100)}%`;
+        timeTrack.classList.add("seekable");
       } else {
         timeDurationEl.textContent = "";
         timeFill.style.width = "0%";
+        timeTrack.classList.remove("seekable");
       }
     } else {
       timeWrap.style.display = "none";
@@ -605,6 +613,24 @@ programResetBtn.addEventListener("click", async () => {
     await fetch(PROGRAM_RESET_URL, { method: "POST" });
     poll();
   } catch (e) {
+    // 未接続時は poll() 側のエラー表示に任せる
+  }
+});
+
+timeTrack.addEventListener("click", async (e) => {
+  if (knownDurationSec == null) return; // 長さ不明の曲はシーク位置を計算できない
+  const rect = timeTrack.getBoundingClientRect();
+  const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+  const seconds = frac * knownDurationSec;
+  timeFill.style.width = `${frac * 100}%`; // 反映を待たず見た目だけ先に動かす
+  try {
+    await fetch(SEEK_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ seconds }),
+    });
+    poll();
+  } catch (e2) {
     // 未接続時は poll() 側のエラー表示に任せる
   }
 });
