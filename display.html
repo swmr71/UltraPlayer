@@ -105,9 +105,11 @@ function fitTrackName() {
 // どちらでも表示できるよう吸収する。
 function extractNowPlaying(data) {
   if (data.mode === "transition") {
+    // 無音転換(流す曲が無い)は画面がほぼ空になってしまうので、状態が一目で
+    // 分かるよう「転換中」自体を(バッジと同じ水色で)大きく表示する。
     return data.bgm
       ? { title: data.bgm.title, statusText: "転換中", playing: true, sub: formatTrackSub(data.bgm) }
-      : { title: "(無音転換)", statusText: "転換中", playing: false, sub: "" };
+      : { title: "転換中", titleColor: "#7de1ff", statusText: "転換中", playing: false, sub: "" };
   }
   // 未開始 (Nをまだ一度も押していない)。開演前で客席からスクリーンが見えている
   // 時間帯なので、最初の演目名を出しておく。この分岐が無いと下の返り値に落ちて
@@ -136,6 +138,7 @@ async function poll() {
 
     const info = extractNowPlaying(data);
     trackName.textContent = info.title ?? "";
+    trackName.style.color = info.titleColor || "";
     trackSub.textContent = info.sub || "";
     statusBadge.textContent = info.statusText;
     appEl.classList.toggle("paused", !info.playing);
