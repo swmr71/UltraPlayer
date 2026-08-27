@@ -114,7 +114,9 @@ function fitTrackName() {
 // どちらでも表示できるよう吸収する。
 function extractNowPlaying(data) {
   if (data.mode === "transition") {
-    return { title: data.bgm.title, statusText: "転換中", playing: true };
+    return data.bgm
+      ? { title: data.bgm.title, statusText: "転換中", playing: true }
+      : { title: "(無音転換)", statusText: "転換中", playing: false };
   }
   if (data.mode === "performing") {
     return { title: data.current_item, statusText: "上演中", playing: false };

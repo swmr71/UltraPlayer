@@ -823,11 +823,24 @@ class ProgramController:
             print(f"[警告] ライブラリに該当曲が見つかりません (id={self.bgm_queue[self.bgm_pos]})")
 
     def _start_transition(self, target_idx: int) -> str:
+        """転換中に入る。転換用プレイリストが割り当てられてなければ
+        (または割り当て先が空プレイリストなら)無音のまま転換中になる
+        (自動でperformingへスキップしない。次のNで上演開始する)。
+        """
         item = self.items[target_idx]
-        self._play_queue(self._bgm_ids(item), item.get("playlistId"))
+        bgm_ids = self._bgm_ids(item)
+        if bgm_ids:
+            self._play_queue(bgm_ids, item.get("playlistId"))
+        else:
+            self.player.stop()
+            self.bgm_queue = []
+            self.bgm_pos = 0
+            self.active_playlist_id = None
+            self.active_playlist_loops = True
         self.target_idx = target_idx
         self.mode = "transition"
-        return f"[PROGRAM] 転換中 -> {item['name']}"
+        suffix = "" if bgm_ids else " (無音)"
+        return f"[PROGRAM] 転換中 -> {item['name']}{suffix}"
 
     def _start_performing(self, idx: int) -> str:
         item = self.items[idx]
@@ -846,14 +859,14 @@ class ProgramController:
         return f"[PROGRAM] 上演開始: {item['name']}{suffix}"
 
     def advance(self) -> str:
-        """次第を1つ進める。最初の呼び出しは演目1を開始する
-        (演目1に転換用プレイリストがあれば、まずその転換から明示的に始まる)。
+        """次第を1つ進める。最初の呼び出しは演目1への転換から始まる
+        (転換用プレイリストが割り当てられてなければ無音の転換になる。
+        BGMの有無に関わらず、必ず転換中を経てからもう一度Nで上演開始する)。
         """
         if not self.started:
             snap = self._snapshot()
             self.started = True
-            bgm_ids = self._bgm_ids(self.items[0])
-            msg = self._start_transition(0) if bgm_ids else self._start_performing(0)
+            msg = self._start_transition(0)
             self._history.append(snap)
             return msg
 
@@ -870,8 +883,7 @@ class ProgramController:
 
         snap = self._snapshot()
         self._record_resume_position()
-        bgm_ids = self._bgm_ids(self.items[next_idx])
-        msg = self._start_transition(next_idx) if bgm_ids else self._start_performing(next_idx)
+        msg = self._start_transition(next_idx)
         self._history.append(snap)
         return msg
 
@@ -951,18 +963,20 @@ class ProgramController:
 
     def status(self) -> dict:
         if not self.started:
-            starts_with = "transition" if self._bgm_ids(self.items[0]) else "performing"
             return {
                 "mode": "ready",
-                "starts_with": starts_with,
+                "starts_with": "transition",
+                "starts_with_bgm": bool(self._bgm_ids(self.items[0])),
                 "next_item": self.items[0]["name"],
             }
         if self.mode == "transition":
-            return {
+            info = {
                 "mode": "transition",
                 "next_item": self.items[self.target_idx]["name"],
-                "bgm": self.player.current_public(),
             }
+            if self.bgm_queue:
+                info["bgm"] = self.player.current_public()
+            return info
         info = {
             "mode": "performing",
             "current_item": self.items[self.current_idx]["name"],

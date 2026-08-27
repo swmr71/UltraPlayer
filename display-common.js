@@ -123,9 +123,12 @@ function layoutTransition(data) {
   if (MONITOR === 1) {
     trackName.textContent = `Next: ${data.next_item}`;
     trackName.style.fontSize = (heightCm * 0.28 * myPxPerCm) + "px";
-  } else {
+  } else if (data.bgm) {
     const author = data.bgm.author ? `/${data.bgm.author}` : "";
     trackName.textContent = `再生中：${data.bgm.title}${author}`;
+    trackName.style.fontSize = (heightCm * 0.08 * myPxPerCm) + "px";
+  } else {
+    trackName.textContent = "(無音転換)";
     trackName.style.fontSize = (heightCm * 0.08 * myPxPerCm) + "px";
   }
   statusBadge.textContent = "転換中";

@@ -472,15 +472,19 @@ function renderProgram(program) {
   if (program.mode === "ready") {
     programMode.textContent = "開始前";
     programItem.textContent = program.next_item;
-    programSub.textContent = program.starts_with === "transition"
+    programSub.textContent = program.starts_with_bgm
       ? "最初は転換(BGM再生)から始まります"
-      : "BGMなしでこの演目から始まります";
+      : "最初は転換(無音)から始まります";
     programAdvanceBtn.textContent = "開始する (N)";
   } else if (program.mode === "transition") {
-    programMode.textContent = "転換中";
+    programMode.textContent = program.bgm ? "転換中" : "転換中 (無音)";
     programItem.textContent = `Next: ${program.next_item}`;
-    const author = program.bgm.author ? ` / ${program.bgm.author}` : "";
-    programSub.textContent = `再生中BGM: ${program.bgm.title}${author}`;
+    if (program.bgm) {
+      const author = program.bgm.author ? ` / ${program.bgm.author}` : "";
+      programSub.textContent = `再生中BGM: ${program.bgm.title}${author}`;
+    } else {
+      programSub.textContent = "BGMなし";
+    }
     programAdvanceBtn.textContent = "次の演目へ (N)";
   } else {
     programMode.textContent = program.bgm ? "上演中 (BGMあり)" : "上演中";
