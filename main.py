@@ -1072,6 +1072,7 @@ class ProgramController:
         info["started"] = self.started
         info["can_go_back"] = bool(self._history)
         info["current_idx"] = self.current_idx
+        info["target_idx"] = self.target_idx
         info["total_items"] = len(self.items)
         info["items"] = [item["name"] for item in self.items]
 

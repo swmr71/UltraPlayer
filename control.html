@@ -172,7 +172,11 @@
     font-size: 13px; color: #aaa;
   }
   .track-row.active { background: rgba(125,225,255,0.14); color: #fff; }
+  .track-row.transitioning { background: rgba(184,139,255,0.14); color: #fff; }
   .track-num { opacity: 0.5; width: 2ch; }
+
+  #program-list-card { margin-top: 24px; }
+  #program-list { display: flex; flex-direction: column; gap: 6px; }
 
   #meta {
     margin-top: 24px;
@@ -273,6 +277,10 @@
         <div id="volume-label"><span>VOLUME</span><span id="volume-value">50%</span></div>
         <div id="volume-track"><div id="volume-fill"></div></div>
       </div>
+    </div>
+    <div id="program-list-card" style="display:none;">
+      <h2>次第一覧</h2>
+      <div id="program-list"></div>
     </div>
     <div id="meta">
       <span id="conn-dot"></span><span id="conn-text">接続待機中...</span><br><br>
@@ -389,6 +397,8 @@ const playlistEl = document.getElementById("playlist");
 const connDot = document.getElementById("conn-dot");
 const connText = document.getElementById("conn-text");
 const programCard = document.getElementById("program-card");
+const programListCard = document.getElementById("program-list-card");
+const programListEl = document.getElementById("program-list");
 const programMode = document.getElementById("program-mode");
 const programItem = document.getElementById("program-item");
 const programSub = document.getElementById("program-sub");
@@ -460,7 +470,30 @@ function renderProgramPlaylist(program) {
   }
 }
 
+function renderProgramList(program) {
+  if (!program || !Array.isArray(program.items) || !program.items.length) {
+    programListCard.style.display = "none";
+    return;
+  }
+  programListCard.style.display = "";
+  programListEl.innerHTML = program.items.map((name, i) => {
+    let cls = "track-row";
+    let suffix = "";
+    if (program.mode === "transition" && i === program.target_idx) {
+      cls += " transitioning";
+      suffix = " (転換中)";
+    } else if (program.mode === "performing" && i === program.current_idx) {
+      cls += " active";
+      suffix = " (上演中)";
+    } else if (program.mode === "ready" && i === 0) {
+      suffix = " (開始前)";
+    }
+    return `<div class="${cls}"><span class="track-num">${String(i + 1).padStart(2, "0")}</span><span>${escapeHtml(name)}${suffix}</span></div>`;
+  }).join("");
+}
+
 function renderProgram(program) {
+  renderProgramList(program);
   if (!program) {
     programCard.style.display = "none";
     return;
