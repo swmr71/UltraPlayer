@@ -358,11 +358,10 @@ function resolvePlaylistTrackIds(allPlaylists, playlistId, ancestors) {
   if (ancestors.has(playlistId)) return [];
   const pl = allPlaylists.find(p => p.id === playlistId);
   if (!pl) return [];
-  const sourceIds = pl.sourcePlaylistIds || [];
-  if (sourceIds.length) {
+  if (Array.isArray(pl.sourcePlaylistIds)) {
     const nextAncestors = new Set(ancestors);
     nextAncestors.add(playlistId);
-    return sourceIds.flatMap(id => resolvePlaylistTrackIds(allPlaylists, id, nextAncestors));
+    return pl.sourcePlaylistIds.flatMap(id => resolvePlaylistTrackIds(allPlaylists, id, nextAncestors));
   }
   return pl.trackIds || [];
 }
@@ -377,7 +376,11 @@ function renderPlaylistManager() {
     const card = document.createElement("div");
     card.className = "playlist-card";
 
-    const isCombined = (pl.sourcePlaylistIds || []).length > 0;
+    // sourcePlaylistIdsが「配列として存在するか」で判定する(中身が空でも結合
+    // モードとして扱う)。.lengthで判定すると、結合オンにした直後(まだ何も
+    // 追加してない=空配列)のタイミングで再描画されるたびにOFFへ戻ってしまい、
+    // チェックボックスがONにできないように見えるバグになっていた。
+    const isCombined = Array.isArray(pl.sourcePlaylistIds);
     const trackIds = pl.trackIds || [];
     const resolvedTrackIds = isCombined ? resolvePlaylistTrackIds(playlists, pl.id) : trackIds;
 
@@ -613,7 +616,7 @@ function renderPlaylistPicker(item, idx, field, playlistById, libraryById, legac
   let previewHtml;
   const selected = item[field] ? playlistById[item[field]] : null;
   if (selected) {
-    const resolvedIds = (selected.sourcePlaylistIds || []).length
+    const resolvedIds = Array.isArray(selected.sourcePlaylistIds)
       ? resolvePlaylistTrackIds(playlists, selected.id)
       : (selected.trackIds || []);
     const titles = resolvedIds

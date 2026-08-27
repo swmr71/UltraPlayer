@@ -673,8 +673,12 @@ def load_playlists(track_dir: str) -> dict:
         p = raw.get(pid)
         if not p:
             return []
-        source_ids = p.get("sourcePlaylistIds") or []
-        if source_ids:
+        # sourcePlaylistIdsが「キーとして存在するか」で結合プレイリスト扱いする
+        # (空配列でもtrackIdsへフォールバックしない)。中身の有無ではなく
+        # `or []`で判定すると、結合先を1つも追加してない結合プレイリストが
+        # 古いtrackIdsを再生してしまう事故になる。
+        source_ids = p.get("sourcePlaylistIds")
+        if source_ids is not None:
             next_ancestors = ancestors | {pid}
             ids = []
             for sid in source_ids:
