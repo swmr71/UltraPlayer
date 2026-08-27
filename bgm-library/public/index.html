@@ -31,9 +31,25 @@
   .program-item input[type=text] { width: 220px; }
   .program-item-main { flex: 1; }
   .program-item-main select { width: 100%; margin-top: 6px; box-sizing: border-box; }
+  .program-item input.section-field { width: 160px; }
   .playlist-preview { margin-top: 6px; font-size: 12px; color: #9fd6a8; }
   .playlist-preview.empty { color: #888; }
   .playlist-picker-label { display: block; font-size: 11px; color: #888; margin-top: 10px; letter-spacing: 0.02em; }
+  .program-section { margin-top: 14px; }
+  .program-section-header {
+    display: flex; align-items: center; gap: 8px;
+    background: #262933; border: 1px solid #383b45; border-radius: 8px 8px 0 0;
+    padding: 8px 14px;
+  }
+  .program-section.collapsed .program-section-header { border-radius: 8px; }
+  .program-section-header .section-toggle {
+    background: none; margin: 0; padding: 0 4px; font-size: 14px; color: #9fd6a8;
+  }
+  .program-section-header strong { flex: 1; font-size: 13px; }
+  .program-section-header button.secondary, .program-section-header button.danger { margin: 0; padding: 3px 8px; font-size: 11px; }
+  .program-section-body { border: 1px solid #383b45; border-top: none; border-radius: 0 0 8px 8px; padding: 1px 14px 10px; }
+  .program-section-body .program-item:first-child { margin-top: 10px; }
+  .program-section.collapsed .program-section-body { display: none; }
   .bgm-playlist { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
   .bgm-chip { display: flex; align-items: center; gap: 6px; background: #1b1d23; border: 1px solid #444; border-radius: 4px; padding: 3px 6px; font-size: 12px; }
   .bgm-chip .bgm-chip-title { flex: 1; }
@@ -661,44 +677,151 @@ function renderBgmPicker(item, idx, playlistField, trackField, playlistById, lib
   `;
 }
 
+// セクション(演目のグループ化)の折りたたみ状態。再描画をまたいで保持したいので
+// renderProgram()の外(モジュールスコープ)に置く。保存はしない(ページを開き直すと
+// 全展開に戻る。あくまで編集中の見た目の便宜のため)。
+const collapsedSections = new Set();
+
+// programを「隣接する同じ section 値の演目」でグループ化し、描画用のブロック列にする。
+// section が空/未設定の演目はグループ化せず単独のブロックになる。
+function buildProgramBlocks() {
+  const blocks = [];
+  let current = null;
+  program.forEach((item, i) => {
+    const sec = (item.section || "").trim();
+    if (sec) {
+      if (current && current.type === "section" && current.name === sec) {
+        current.entries.push({ item, idx: i });
+      } else {
+        current = { type: "section", name: sec, entries: [{ item, idx: i }] };
+        blocks.push(current);
+      }
+    } else {
+      current = null;
+      blocks.push({ type: "single", item, idx: i });
+    }
+  });
+  return blocks;
+}
+
+function renderProgramItemRow(item, i, playlistById, libraryById) {
+  const row = document.createElement("div");
+  row.className = "program-item";
+
+  const legacyBgm = !item.playlistId && !item.trackId && item.bgm
+    ? (Array.isArray(item.bgm) ? item.bgm : [item.bgm])
+    : [];
+
+  row.innerHTML = `
+    <span class="muted">#${i + 1}</span>
+    <div class="program-item-main">
+      <input type="text" value="${escapeAttr(item.name || "")}" data-idx="${i}" data-field="name" placeholder="演目名 (例: 劇『桃太郎』)" />
+      <label class="playlist-picker-label">セクション (任意。隣接する演目に同じ名前を付けるとまとめて折りたためます)</label>
+      <input type="text" class="section-field" value="${escapeAttr(item.section || "")}" data-idx="${i}" data-field="section" placeholder="例: 第一部" />
+      <label class="playlist-picker-label">転換に使う曲/プレイリスト (この演目に入るとき)</label>
+      ${renderBgmPicker(item, i, "playlistId", "trackId", playlistById, libraryById, legacyBgm)}
+      <label class="playlist-picker-label">上演中に流す曲/プレイリスト (この演目の間ずっと)</label>
+      ${renderBgmPicker(item, i, "performingPlaylistId", "performingTrackId", playlistById, libraryById, null)}
+      <label style="display:block;margin-top:6px;">
+        <input type="checkbox" data-idx="${i}" data-field="performingAutoplay" style="width:auto;display:inline-block;vertical-align:middle;" ${item.performingAutoplay ? "checked" : ""} />
+        上演開始と同時にBGMを自動再生する (未チェック: 頭出しだけして、▶を押すまで鳴らさない)
+      </label>
+    </div>
+    <button class="secondary" data-up="${i}" type="button">↑</button>
+    <button class="secondary" data-down="${i}" type="button">↓</button>
+    <button class="danger" data-remove="${i}" type="button">演目削除</button>
+  `;
+  return row;
+}
+
 function renderProgram() {
   const container = document.getElementById("program-list");
   container.innerHTML = "";
   const playlistById = Object.fromEntries(playlists.map(p => [p.id, p]));
   const libraryById = Object.fromEntries(library.map(t => [t.id, t]));
 
-  program.forEach((item, i) => {
-    const row = document.createElement("div");
-    row.className = "program-item";
+  buildProgramBlocks().forEach(block => {
+    if (block.type === "single") {
+      container.appendChild(renderProgramItemRow(block.item, block.idx, playlistById, libraryById));
+      return;
+    }
+    const collapsed = collapsedSections.has(block.name);
+    const wrap = document.createElement("div");
+    wrap.className = "program-section" + (collapsed ? " collapsed" : "");
 
-    const legacyBgm = !item.playlistId && !item.trackId && item.bgm
-      ? (Array.isArray(item.bgm) ? item.bgm : [item.bgm])
-      : [];
-
-    row.innerHTML = `
-      <span class="muted">#${i + 1}</span>
-      <div class="program-item-main">
-        <input type="text" value="${escapeAttr(item.name || "")}" data-idx="${i}" data-field="name" placeholder="演目名 (例: 劇『桃太郎』)" />
-        <label class="playlist-picker-label">転換に使う曲/プレイリスト (この演目に入るとき)</label>
-        ${renderBgmPicker(item, i, "playlistId", "trackId", playlistById, libraryById, legacyBgm)}
-        <label class="playlist-picker-label">上演中に流す曲/プレイリスト (この演目の間ずっと)</label>
-        ${renderBgmPicker(item, i, "performingPlaylistId", "performingTrackId", playlistById, libraryById, null)}
-        <label style="display:block;margin-top:6px;">
-          <input type="checkbox" data-idx="${i}" data-field="performingAutoplay" style="width:auto;display:inline-block;vertical-align:middle;" ${item.performingAutoplay ? "checked" : ""} />
-          上演開始と同時にBGMを自動再生する (未チェック: 頭出しだけして、▶を押すまで鳴らさない)
-        </label>
-      </div>
-      <button class="secondary" data-up="${i}" type="button">↑</button>
-      <button class="secondary" data-down="${i}" type="button">↓</button>
-      <button class="danger" data-remove="${i}" type="button">演目削除</button>
+    const header = document.createElement("div");
+    header.className = "program-section-header";
+    header.innerHTML = `
+      <button type="button" class="section-toggle" data-toggle-section="${escapeAttr(block.name)}">${collapsed ? "▸" : "▾"}</button>
+      <strong>${escapeHtml(block.name)}</strong>
+      <span class="muted">(${block.entries.length}演目)</span>
+      <button type="button" class="secondary" data-add-to-section="${escapeAttr(block.name)}">+演目</button>
+      <button type="button" class="secondary" data-rename-section="${escapeAttr(block.name)}">名前変更</button>
+      <button type="button" class="danger" data-ungroup-section="${escapeAttr(block.name)}">セクション解除</button>
     `;
-    container.appendChild(row);
+    wrap.appendChild(header);
+
+    const body = document.createElement("div");
+    body.className = "program-section-body";
+    block.entries.forEach(({ item, idx }) => {
+      body.appendChild(renderProgramItemRow(item, idx, playlistById, libraryById));
+    });
+    wrap.appendChild(body);
+
+    container.appendChild(wrap);
   });
 
   container.querySelectorAll("input[type=text][data-field]").forEach(el => {
     el.addEventListener("input", () => {
       const idx = Number(el.dataset.idx), field = el.dataset.field;
       program[idx][field] = el.value;
+    });
+  });
+  // セクション名は入力のたびに再描画するとフォーカスが飛ぶので、確定時(blur)だけ
+  // グループ化をやり直す。
+  container.querySelectorAll("input.section-field").forEach(el => {
+    el.addEventListener("change", () => renderProgram());
+  });
+  container.querySelectorAll("[data-toggle-section]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const name = btn.dataset.toggleSection;
+      if (collapsedSections.has(name)) collapsedSections.delete(name); else collapsedSections.add(name);
+      renderProgram();
+    });
+  });
+  container.querySelectorAll("[data-rename-section]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const oldName = btn.dataset.renameSection;
+      const newName = prompt("セクション名を変更", oldName);
+      if (newName === null) return;
+      const trimmed = newName.trim();
+      program.forEach(item => { if ((item.section || "").trim() === oldName) item.section = trimmed; });
+      if (collapsedSections.has(oldName)) {
+        collapsedSections.delete(oldName);
+        if (trimmed) collapsedSections.add(trimmed);
+      }
+      renderProgram();
+    });
+  });
+  container.querySelectorAll("[data-ungroup-section]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const name = btn.dataset.ungroupSection;
+      if (!confirm(`「${name}」セクションを解除しますか?(演目自体は削除されません)`)) return;
+      program.forEach(item => { if ((item.section || "").trim() === name) item.section = ""; });
+      collapsedSections.delete(name);
+      renderProgram();
+    });
+  });
+  container.querySelectorAll("[data-add-to-section]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const name = btn.dataset.addToSection;
+      let lastIdx = -1;
+      program.forEach((item, i) => { if ((item.section || "").trim() === name) lastIdx = i; });
+      program.splice(lastIdx + 1, 0, {
+        name: "", section: name, playlistId: null, trackId: null,
+        performingPlaylistId: null, performingTrackId: null, performingAutoplay: false,
+      });
+      renderProgram();
     });
   });
   container.querySelectorAll("select[data-playlist-field]").forEach(el => {
@@ -743,7 +866,7 @@ function renderProgram() {
 }
 
 document.getElementById("btn-add-item").addEventListener("click", () => {
-  program.push({ name: "", playlistId: null, trackId: null, performingPlaylistId: null, performingTrackId: null, performingAutoplay: false });
+  program.push({ name: "", section: "", playlistId: null, trackId: null, performingPlaylistId: null, performingTrackId: null, performingAutoplay: false });
   renderProgram();
 });
 
