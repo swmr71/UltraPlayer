@@ -35,6 +35,9 @@ const { promisify } = require("util");
 const execFileAsync = promisify(execFile);
 
 const PORT = Number(process.env.PORT || 4000);
+// 既定は 0.0.0.0 (LAN内の他端末から管理画面を開ける)。認証は無いので、
+// ローカル限定にしたい場合だけ .env で HOST=127.0.0.1 を指定する。
+const HOST = process.env.HOST || "0.0.0.0";
 const TRACKS_DIR = path.resolve(__dirname, process.env.TRACKS_DIR || "../tracks");
 const PROGRAM_FILE = path.resolve(__dirname, process.env.PROGRAM_FILE || "../program.json");
 const LIBRARY_FILE = path.join(TRACKS_DIR, "tracks.json");
@@ -92,6 +95,34 @@ async function detectDemucsDevice() {
 fs.mkdirSync(TRACKS_DIR, { recursive: true });
 
 // ------------------------------------------------------------
+// JSON台帳 (tracks.json / program.json / playlists.json) の書き込み
+//
+// - writeJsonAtomic: 一時ファイルに書いてから rename する。writeFileSync の
+//   途中でプロセスが落ちるとJSONが切れ、main.py 側が「tracks.jsonが読めない」
+//   → フォルダ直下のmp3を素朴に列挙するモードに黙って降格してしまう
+//   (曲名・伏字タイトルが全部UUIDになる)。
+// - withLock: load→編集→save を直列化する。ボーカル除去の完了コールバックや
+//   backfillDurations は非同期に走るため、その間のアップロード/メタ編集と
+//   衝突すると片方の更新が丸ごと消える。
+// ------------------------------------------------------------
+function writeJsonAtomic(file, data) {
+  const tmp = `${file}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), "utf-8");
+  fs.renameSync(tmp, file);
+}
+
+let writeChain = Promise.resolve();
+function withLock(fn) {
+  const run = writeChain.then(fn, fn);
+  // 直前の処理が失敗しても後続を止めない
+  writeChain = run.then(
+    () => {},
+    () => {}
+  );
+  return run;
+}
+
+// ------------------------------------------------------------
 // ライブラリ (tracks.json) の読み書き
 // ------------------------------------------------------------
 function loadLibrary() {
@@ -104,7 +135,7 @@ function loadLibrary() {
 }
 
 function saveLibrary(list) {
-  fs.writeFileSync(LIBRARY_FILE, JSON.stringify(list, null, 2), "utf-8");
+  writeJsonAtomic(LIBRARY_FILE, list);
 }
 
 // ------------------------------------------------------------
@@ -139,7 +170,7 @@ function loadProgram() {
 }
 
 function saveProgram(items) {
-  fs.writeFileSync(PROGRAM_FILE, JSON.stringify(items, null, 2), "utf-8");
+  writeJsonAtomic(PROGRAM_FILE, items);
 }
 
 // ------------------------------------------------------------
@@ -156,7 +187,7 @@ function loadPlaylists() {
 }
 
 function savePlaylists(list) {
-  fs.writeFileSync(PLAYLISTS_FILE, JSON.stringify(list, null, 2), "utf-8");
+  writeJsonAtomic(PLAYLISTS_FILE, list);
 }
 
 // ------------------------------------------------------------
@@ -223,10 +254,43 @@ async function downloadYoutubeAudio(url, id) {
 // ------------------------------------------------------------
 const jobs = new Map(); // jobId -> {status: "running"|"done"|"error", progress, trackId?, error?, result?}
 
+// 完了したジョブを保持しておく時間。画面のポーリングが結果を拾えるだけの猶予を
+// 持たせつつ、いつまでもMapに残り続けない(=リークしない)ようにする。
+const JOB_RETENTION_MS = 60 * 60 * 1000;
+
 function createJob(trackId) {
   const id = uuidv4();
   jobs.set(id, { status: "running", progress: 0, trackId });
   return id;
+}
+
+function finishJob(jobId, data) {
+  jobs.set(jobId, { ...data, finishedAt: Date.now() });
+  const now = Date.now();
+  for (const [id, job] of jobs) {
+    if (job.status !== "running" && job.finishedAt && now - job.finishedAt > JOB_RETENTION_MS) {
+      jobs.delete(id);
+    }
+  }
+}
+
+// 中断された(プロセスが強制終了された等)ボーカル除去の作業ディレクトリを掃除する。
+// removeVocals() の finally は正常系でしか動かないため、起動時にも消しておく。
+// Demucsの中間ファイル(分離済みwav)は元音源より大きく、放置するとディスクを圧迫する。
+function cleanupDemucsWorkDirs() {
+  let removed = 0;
+  try {
+    for (const name of fs.readdirSync(TRACKS_DIR)) {
+      if (!name.startsWith(".demucs-")) continue;
+      try {
+        fs.rmSync(path.join(TRACKS_DIR, name), { recursive: true, force: true });
+        removed += 1;
+      } catch {}
+    }
+  } catch {}
+  if (removed) {
+    console.log(`[bgm-library] 中断されたボーカル除去の作業ディレクトリを${removed}件削除しました`);
+  }
 }
 
 // ------------------------------------------------------------
@@ -351,6 +415,14 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 app.use("/tracks-file", express.static(TRACKS_DIR)); // 試聴用に音源を配信
 
+// express 4 は async ハンドラが返すPromiseの reject をキャッチしない。
+// Node 18以降は未処理のPromise拒否がプロセス終了になるため、保存に失敗した程度で
+// bgm-library ごと落ちてしまう (同期ハンドラなら express が拾って500を返していた)。
+// 全ての async ハンドラをこれで包み、下のエラーミドルウェアに渡す。
+function asyncRoute(fn) {
+  return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+}
+
 const ALLOWED_EXT = new Set([".mp3", ".wav", ".ogg"]);
 
 const upload = multer({
@@ -374,7 +446,7 @@ app.get("/api/tracks", (req, res) => {
 });
 
 // 曲アップロード
-app.post("/api/tracks", upload.single("file"), async (req, res) => {
+app.post("/api/tracks", upload.single("file"), asyncRoute(async (req, res) => {
   if (!req.file) {
     res.status(400).json({ error: "音源ファイル(mp3/wav/ogg)を指定してください" });
     return;
@@ -398,14 +470,16 @@ app.post("/api/tracks", upload.single("file"), async (req, res) => {
     createdAt: new Date().toISOString(),
   };
 
-  const library = loadLibrary();
-  library.push(entry);
-  saveLibrary(library);
+  await withLock(() => {
+    const library = loadLibrary();
+    library.push(entry);
+    saveLibrary(library);
+  });
   res.status(201).json(entry);
-});
+}));
 
 // YouTube動画の情報(タイトル・投稿者)を取得 (ダウンロードはしない、フォーム補完用)
-app.get("/api/youtube-info", async (req, res) => {
+app.get("/api/youtube-info", asyncRoute(async (req, res) => {
   const url = (req.query.url || "").trim();
   if (!url) {
     res.status(400).json({ error: "urlを指定してください" });
@@ -421,10 +495,10 @@ app.get("/api/youtube-info", async (req, res) => {
   } catch (e) {
     res.status(502).json({ error: `情報取得に失敗しました: ${String(e.message || e)}` });
   }
-});
+}));
 
 // YouTube動画から音声をダウンロードしてライブラリに登録
-app.post("/api/tracks/from-youtube", async (req, res) => {
+app.post("/api/tracks/from-youtube", asyncRoute(async (req, res) => {
   const url = (req.body.url || "").trim();
   const title = (req.body.title || "").trim();
   if (!url || !isYoutubeUrl(url)) {
@@ -451,14 +525,16 @@ app.post("/api/tracks/from-youtube", async (req, res) => {
       durationSec: await probeDurationSec(path.join(TRACKS_DIR, filename)),
       createdAt: new Date().toISOString(),
     };
-    const library = loadLibrary();
-    library.push(entry);
-    saveLibrary(library);
+    await withLock(() => {
+      const library = loadLibrary();
+      library.push(entry);
+      saveLibrary(library);
+    });
     res.status(201).json(entry);
   } catch (e) {
     res.status(502).json({ error: `ダウンロードに失敗しました: ${String(e.message || e)}` });
   }
-});
+}));
 
 // ボーカル除去 (Demucs) を実行し、インストゥルメンタル版を新しい曲として登録する
 app.post("/api/tracks/:id/remove-vocals", (req, res) => {
@@ -497,13 +573,15 @@ app.post("/api/tracks/:id/remove-vocals", (req, res) => {
         durationSec: await probeDurationSec(path.join(TRACKS_DIR, filename)),
         createdAt: new Date().toISOString(),
       };
-      const current = loadLibrary();
-      current.push(newEntry);
-      saveLibrary(current);
-      jobs.set(jobId, { status: "done", progress: 100, result: newEntry });
+      await withLock(() => {
+        const current = loadLibrary();
+        current.push(newEntry);
+        saveLibrary(current);
+      });
+      finishJob(jobId, { status: "done", progress: 100, result: newEntry });
     })
     .catch((e) => {
-      jobs.set(jobId, { status: "error", progress: 0, error: `ボーカル除去に失敗しました: ${String(e.message || e)}` });
+      finishJob(jobId, { status: "error", progress: 0, error: `ボーカル除去に失敗しました: ${String(e.message || e)}` });
     });
 });
 
@@ -526,40 +604,48 @@ app.get("/api/jobs/:id", (req, res) => {
 });
 
 // 曲メタデータ編集 (曲名/表示用曲名/作者/注記/BGM化フラグ)
-app.patch("/api/tracks/:id", (req, res) => {
-  const library = loadLibrary();
-  const entry = library.find((t) => t.id === req.params.id);
+app.patch("/api/tracks/:id", asyncRoute(async (req, res) => {
+  const entry = await withLock(() => {
+    const library = loadLibrary();
+    const found = library.find((t) => t.id === req.params.id);
+    if (!found) return null;
+    for (const key of ["title", "displayTitle", "author", "note"]) {
+      if (typeof req.body[key] === "string") found[key] = req.body[key].trim();
+    }
+    if (typeof req.body.arranged === "boolean") found.arranged = req.body.arranged;
+    saveLibrary(library);
+    return found;
+  });
   if (!entry) {
     res.status(404).json({ error: "not found" });
     return;
   }
-  for (const key of ["title", "displayTitle", "author", "note"]) {
-    if (typeof req.body[key] === "string") entry[key] = req.body[key].trim();
-  }
-  if (typeof req.body.arranged === "boolean") entry.arranged = req.body.arranged;
-  saveLibrary(library);
   res.json(entry);
-});
+}));
 
 // 曲削除 (ファイルごと削除。行事の次第から参照されている場合は警告だけ返して削除は実行する)
-app.delete("/api/tracks/:id", (req, res) => {
-  const library = loadLibrary();
-  const idx = library.findIndex((t) => t.id === req.params.id);
-  if (idx === -1) {
+app.delete("/api/tracks/:id", asyncRoute(async (req, res) => {
+  const entry = await withLock(() => {
+    const library = loadLibrary();
+    const idx = library.findIndex((t) => t.id === req.params.id);
+    if (idx === -1) return null;
+    const [removed] = library.splice(idx, 1);
+    saveLibrary(library);
+    return removed;
+  });
+  if (!entry) {
     res.status(404).json({ error: "not found" });
     return;
   }
-  const [entry] = library.splice(idx, 1);
-  saveLibrary(library);
   fs.unlink(path.join(TRACKS_DIR, entry.filename), () => {});
 
   const program = loadProgram();
   const stillUsed = program.some((item) => item.bgm === entry.id);
   res.json({ deleted: entry.id, warning: stillUsed ? "行事の次第から参照されたままです" : null });
-});
+}));
 
 // last.fmで作者候補を検索 (未設定なら空配列を返す)
-app.get("/api/artist-search", async (req, res) => {
+app.get("/api/artist-search", asyncRoute(async (req, res) => {
   const q = (req.query.q || "").trim();
   if (!q) {
     res.json({ enabled: Boolean(LASTFM_API_KEY), results: [] });
@@ -575,14 +661,14 @@ app.get("/api/artist-search", async (req, res) => {
   } catch (e) {
     res.status(502).json({ enabled: true, results: [], error: String(e.message || e) });
   }
-});
+}));
 
 // 行事の次第 (program.json) の取得/保存
 app.get("/api/program", (req, res) => {
   res.json(loadProgram());
 });
 
-app.put("/api/program", (req, res) => {
+app.put("/api/program", asyncRoute(async (req, res) => {
   if (!Array.isArray(req.body)) {
     res.status(400).json({ error: "配列で送ってください" });
     return;
@@ -593,9 +679,9 @@ app.put("/api/program", (req, res) => {
       return;
     }
   }
-  saveProgram(req.body);
+  await withLock(() => saveProgram(req.body));
   res.json(req.body);
-});
+}));
 
 // 転換用プレイリスト一覧
 app.get("/api/playlists", (req, res) => {
@@ -603,7 +689,7 @@ app.get("/api/playlists", (req, res) => {
 });
 
 // プレイリスト作成
-app.post("/api/playlists", (req, res) => {
+app.post("/api/playlists", asyncRoute(async (req, res) => {
   const name = (req.body.name || "").trim();
   if (!name) {
     res.status(400).json({ error: "プレイリスト名を入力してください" });
@@ -616,51 +702,95 @@ app.post("/api/playlists", (req, res) => {
     note: (req.body.note || "").trim(),
     loop: req.body.loop !== false, // 既定でループする(従来通り)。false明示時だけOFF
   };
-  const playlists = loadPlaylists();
-  playlists.push(entry);
-  savePlaylists(playlists);
+  await withLock(() => {
+    const playlists = loadPlaylists();
+    playlists.push(entry);
+    savePlaylists(playlists);
+  });
   res.status(201).json(entry);
-});
+}));
 
 // プレイリスト編集 (名前/曲リスト/注記)
-app.patch("/api/playlists/:id", (req, res) => {
-  const playlists = loadPlaylists();
-  const entry = playlists.find((p) => p.id === req.params.id);
+app.patch("/api/playlists/:id", asyncRoute(async (req, res) => {
+  const entry = await withLock(() => {
+    const playlists = loadPlaylists();
+    const found = playlists.find((p) => p.id === req.params.id);
+    if (!found) return null;
+    if (typeof req.body.name === "string" && req.body.name.trim()) found.name = req.body.name.trim();
+    if (typeof req.body.note === "string") found.note = req.body.note.trim();
+    if (Array.isArray(req.body.trackIds)) found.trackIds = req.body.trackIds;
+    if (typeof req.body.loop === "boolean") found.loop = req.body.loop;
+    // 結合プレイリスト(他のプレイリストを順番につなげたもの)。
+    // 空配列[]は「結合モードだが中身が空」、nullは「結合モード自体を解除して
+    // 通常のプレイリスト(trackIds使用)に戻す」で明確に区別する。
+    if (Array.isArray(req.body.sourcePlaylistIds)) found.sourcePlaylistIds = req.body.sourcePlaylistIds;
+    else if (req.body.sourcePlaylistIds === null) delete found.sourcePlaylistIds;
+    savePlaylists(playlists);
+    return found;
+  });
   if (!entry) {
     res.status(404).json({ error: "not found" });
     return;
   }
-  if (typeof req.body.name === "string" && req.body.name.trim()) entry.name = req.body.name.trim();
-  if (typeof req.body.note === "string") entry.note = req.body.note.trim();
-  if (Array.isArray(req.body.trackIds)) entry.trackIds = req.body.trackIds;
-  if (typeof req.body.loop === "boolean") entry.loop = req.body.loop;
-  // 結合プレイリスト(他のプレイリストを順番につなげたもの)。
-  // 空配列[]は「結合モードだが中身が空」、nullは「結合モード自体を解除して
-  // 通常のプレイリスト(trackIds使用)に戻す」で明確に区別する。
-  if (Array.isArray(req.body.sourcePlaylistIds)) entry.sourcePlaylistIds = req.body.sourcePlaylistIds;
-  else if (req.body.sourcePlaylistIds === null) delete entry.sourcePlaylistIds;
-  savePlaylists(playlists);
   res.json(entry);
-});
+}));
 
 // プレイリスト削除 (行事の次第から参照中なら警告だけ返して削除は実行する)
-app.delete("/api/playlists/:id", (req, res) => {
-  const playlists = loadPlaylists();
-  const idx = playlists.findIndex((p) => p.id === req.params.id);
-  if (idx === -1) {
+app.delete("/api/playlists/:id", asyncRoute(async (req, res) => {
+  const ok = await withLock(() => {
+    const playlists = loadPlaylists();
+    const idx = playlists.findIndex((p) => p.id === req.params.id);
+    if (idx === -1) return false;
+    playlists.splice(idx, 1);
+    savePlaylists(playlists);
+    return true;
+  });
+  if (!ok) {
     res.status(404).json({ error: "not found" });
     return;
   }
-  playlists.splice(idx, 1);
-  savePlaylists(playlists);
 
   const program = loadProgram();
   const stillUsed = program.some((item) => item.playlistId === req.params.id);
   res.json({ deleted: req.params.id, warning: stillUsed ? "行事の次第から参照されたままです" : null });
+}));
+
+// 実際に到達できるURLを列挙する (LAN内の別端末から開くときのため)。
+function listenUrls() {
+  if (HOST !== "0.0.0.0" && HOST !== "::") return [`http://${HOST}:${PORT}`];
+  const urls = [`http://127.0.0.1:${PORT}`];
+  for (const list of Object.values(os.networkInterfaces())) {
+    for (const ni of list || []) {
+      if (ni.family === "IPv4" && !ni.internal) urls.push(`http://${ni.address}:${PORT}`);
+    }
+  }
+  return urls;
+}
+
+// 全ルートの後に置くエラーハンドラ。画面側は res.json() を期待しているのでJSONで返す。
+// (multerのファイルサイズ超過などもここに来る)
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, next) => {
+  console.error("[bgm-library] リクエスト処理でエラー:", err);
+  if (res.headersSent) return;
+  res.status(500).json({ error: `サーバー内部エラー: ${String(err.message || err)}` });
+});
+
+// 最後の保険。本番中に取りこぼしで落ちるより、ログを残して動き続けるほうがよい。
+process.on("unhandledRejection", (reason) => {
+  console.error("[bgm-library] 未処理のPromise拒否:", reason);
 });
 
 async function onServerReady() {
-  console.log(`[bgm-library] http://127.0.0.1:${PORT} で起動しました`);
+  cleanupDemucsWorkDirs();
+  console.log(`[bgm-library] 起動しました (bind: ${HOST}:${PORT})`);
+  for (const url of listenUrls()) console.log(`[bgm-library]   ${url}`);
+  if (HOST === "0.0.0.0" || HOST === "::") {
+    console.log(
+      "[bgm-library] 認証はありません。同じLAN上の誰でも曲の追加/削除ができます " +
+        "(.env で HOST=127.0.0.1 にするとローカル限定になります)"
+    );
+  }
   console.log(`[bgm-library] 音源保存先: ${TRACKS_DIR}`);
   console.log(`[bgm-library] 次第ファイル: ${PROGRAM_FILE}`);
   if (!LASTFM_API_KEY) {
@@ -698,10 +828,14 @@ async function backfillDurations() {
   for (const t of targets) {
     t.durationSec = await probeDurationSec(path.join(TRACKS_DIR, t.filename));
   }
-  saveLibrary(loadLibrary().map((t) => {
-    const updated = targets.find((u) => u.id === t.id);
-    return updated ? { ...t, durationSec: updated.durationSec } : t;
-  }));
+  await withLock(() => {
+    saveLibrary(
+      loadLibrary().map((t) => {
+        const updated = targets.find((u) => u.id === t.id);
+        return updated ? { ...t, durationSec: updated.durationSec } : t;
+      })
+    );
+  });
   console.log(`[bgm-library] 曲の長さの取得が完了しました`);
 }
 
@@ -741,7 +875,7 @@ function killProcessOnPort(port) {
 }
 
 function startServer(allowRetry) {
-  const server = app.listen(PORT, onServerReady);
+  const server = app.listen(PORT, HOST, onServerReady);
   server.on("error", (err) => {
     if (err.code === "EADDRINUSE" && allowRetry) {
       console.log(`[bgm-library] ポート${PORT}が使用中です。既存プロセスを終了して再試行します`);

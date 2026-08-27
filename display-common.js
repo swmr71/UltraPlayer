@@ -28,9 +28,11 @@ const state = {
 };
 
 function pxPerCm(monitorState) {
-  if (monitorState.heightCm && monitorState.innerHeightPx) {
-    return monitorState.innerHeightPx / monitorState.heightCm;
-  }
+  // heightCm が未設定・0・不正値 (文字列やnull) だと NaN / Infinity になり、
+  // そのままフォントサイズ計算に伝播して "NaNpx" となり画面から文字が消える。
+  // 過去に不正値が calib_state.json へ保存されていた場合の保険でもある。
+  const value = monitorState.innerHeightPx / monitorState.heightCm;
+  if (Number.isFinite(value) && value > 0) return value;
   return DEFAULT_PX_PER_CM;
 }
 
@@ -93,6 +95,12 @@ function fitTrackName(totalWidthPx) {
 // main.py --program 利用時は {mode, current_item/next_item, bgm} 形式、
 // 未使用時は {track: {title, author, arranged}, playing, ...} 形式で返る。
 function extractNowPlaying(data) {
+  // 未開始 (Nをまだ一度も押していない)。開演前で客席からスクリーンが見えている
+  // 時間帯なので、最初の演目名を出しておく。この分岐が無いと下の返り値に落ちて
+  // title が undefined になり、曲名が空欄のままバッジだけ "PAUSED" と出る。
+  if (data.mode === "ready") {
+    return { title: data.next_item, statusText: "まもなく開始", playing: false };
+  }
   if (data.mode === "performing") {
     return { title: data.current_item, statusText: "上演中", playing: false };
   }
@@ -145,7 +153,7 @@ function render(data) {
     return;
   }
   const info = extractNowPlaying(data);
-  trackName.textContent = info.title;
+  trackName.textContent = info.title ?? "";
   statusBadge.textContent = info.statusText;
   appEl.classList.toggle("paused", !info.playing);
   layoutStage();

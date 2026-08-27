@@ -1,10 +1,18 @@
-opencv-python
-mediapipe==0.10.21
-pygame
-Pillow
+# main.py 本体
+# バージョンは動作確認済みのものに固定する (本番当日の `pip install -r` で
+# 想定外のバージョンが入るのを防ぐため)。
+pygame==2.6.1
+Pillow==12.3.0
+# main.py が np.array() を直接使うため、推移的依存に頼らず明示する
+numpy==1.26.4
 
-vosk
-pyaudio
+# カメラでのハンドサイン認識 (--hand-sign) を使う場合のみ必要
+opencv-python==5.0.0.93
+mediapipe==0.10.21
+
+# 音声コマンド (--voice) を使う場合のみ必要
+vosk==0.3.45
+PyAudio==0.2.14
 
 # bgm-library の「ボーカル除去」機能で使う (任意。使わないなら不要)
-demucs
+demucs==4.1.0

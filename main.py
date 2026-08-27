@@ -51,10 +51,13 @@ import threading
 import queue
 import math
 import json
+import re
 import shutil
+import signal
 import subprocess
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit
 
 import pygame
 from PIL import Image, ImageDraw, ImageFont
@@ -99,15 +102,26 @@ def _get_jp_font(size: int):
     return font
 
 
-def draw_text_ja(frame, text: str, org, font_size: int = 24, color=(255, 255, 255)):
-    """日本語を含むテキストをBGR画像(cv2のframe)に描画するヘルパー"""
+def draw_texts_ja(frame, items):
+    """複数行の日本語テキストをまとめて描画するヘルパー。
+
+    items: [(text, org, font_size, color(BGR)), ...]
+
+    1行ごとに呼ぶとフレーム全体のBGR<->RGB変換とコピーが行数分だけ走って重いので、
+    1フレーム分の行をまとめて渡し、変換を1往復で済ませる。
+    """
+    if not items:
+        return
     pil_img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
     draw = ImageDraw.Draw(pil_img)
-    font = _get_jp_font(font_size)
-    rgb_color = (color[2], color[1], color[0])
-    draw.text(org, text, font=font, fill=rgb_color)
-    result = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-    frame[:] = result
+    for text, org, font_size, color in items:
+        draw.text(org, text, font=_get_jp_font(font_size), fill=(color[2], color[1], color[0]))
+    frame[:] = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+
+
+def draw_text_ja(frame, text: str, org, font_size: int = 24, color=(255, 255, 255)):
+    """1行だけ描画するヘルパー (draw_texts_ja の薄いラッパー)"""
+    draw_texts_ja(frame, [(text, org, font_size, color)])
 
 
 # ------------------------------------------------------------
@@ -134,7 +148,7 @@ class GestureRecognizer:
     def _dist(a, b):
         return math.hypot(a.x - b.x, a.y - b.y)
 
-    def _finger_states(self, landmarks, handedness_label: str):
+    def _finger_states(self, landmarks):
         """各指が伸びているかどうかを bool のリストで返す [親指, 人差し指, 中指, 薬指, 小指]
 
         手首や指の付け根からの距離比で判定することで、手をどの向きに
@@ -158,8 +172,8 @@ class GestureRecognizer:
 
         return states  # [thumb, index, middle, ring, pinky]
 
-    def recognize(self, landmarks, handedness_label: str):
-        thumb, index, middle, ring, pinky = self._finger_states(landmarks, handedness_label)
+    def recognize(self, landmarks):
+        thumb, index, middle, ring, pinky = self._finger_states(landmarks)
         count = sum([thumb, index, middle, ring, pinky])
 
         # パー: 5本すべて開いている
@@ -207,7 +221,7 @@ class GestureRecognizer:
 
     def fire(self, gesture: str) -> bool:
         """クールダウンを考慮して、同じジェスチャーの連続発火を防ぐ"""
-        now = time.time()
+        now = time.monotonic()
         if gesture is None:
             self.last_gesture = None
             return False
@@ -259,7 +273,6 @@ class VoiceController:
         # 遅延importにして、--voiceを使わない人はインストール不要にする
         import vosk
         import pyaudio
-        import json
 
         vosk.SetLogLevel(-1)
         self._json = json
@@ -330,7 +343,16 @@ class BGMPlayer:
     """
 
     def __init__(self, track_dir: str):
-        pygame.mixer.init()
+        # 音声デバイス未接続・他アプリの排他占有・リモートデスクトップ接続中などで
+        # 失敗する。pygameの生の例外のままだと原因が分かりにくいので、
+        # 呼び出し側(main)がそのまま表示できるメッセージに包み直す。
+        try:
+            pygame.mixer.init()
+        except Exception as e:
+            raise RuntimeError(
+                "音声デバイスを初期化できませんでした。デバイスが接続されているか、"
+                f"他のアプリが排他モードで占有していないか確認してください ({e})"
+            ) from e
         self.track_dir = track_dir
         self.library = self._load_library(track_dir)
         if not self.library:
@@ -419,20 +441,26 @@ class BGMPlayer:
         if mtime is None or mtime == self._library_mtime:
             return
         self._library_mtime = mtime
-        current_id = self.library[self.index]["id"] if self.library else None
+        track = self.current_track()
+        current_id = track["id"] if track else None
         new_library = self._load_library(self.track_dir)
         if not new_library:
             return  # 読み込みエラー等で空になった場合は既存のライブラリを維持する
-        self.library = new_library
+
+        new_index = 0
         if current_id is not None:
-            for i, t in enumerate(self.library):
+            for i, t in enumerate(new_library):
                 if t["id"] == current_id:
-                    self.index = i
+                    new_index = i
                     break
             else:
-                self.index = min(self.index, len(self.library) - 1)
-        else:
-            self.index = 0
+                new_index = min(self.index, len(new_library) - 1)
+        # 曲が減った場合、差し替え直後の一瞬だけ index が新ライブラリの範囲外に
+        # なりうる (HTTPスレッドが同時に current_track() を読む)。先に index を
+        # 縮めてから差し替えることで、その窓を無くす。
+        self.index = min(self.index, len(new_library) - 1)
+        self.library = new_library
+        self.index = new_index
 
     def _load_current(self) -> bool:
         """現在のインデックスの曲をロードする。壊れたファイルなど
@@ -448,9 +476,13 @@ class BGMPlayer:
             return False
 
     def current_track(self):
-        if not self.library:
+        # HTTPスレッド(/now-playing, /admin/status)からも呼ばれる。
+        # reload_library_if_changed() によるライブラリ差し替えと競合しても
+        # IndexError でハンドラを落とさないよう、必ず範囲を確認する。
+        library = self.library
+        if not library or not (0 <= self.index < len(library)):
             return None
-        return self.library[self.index]
+        return library[self.index]
 
     def current_name(self):
         """画面/API表示用の曲名 (伏字対応済みのdisplayTitle) を返す"""
@@ -472,7 +504,7 @@ class BGMPlayer:
     def elapsed_sec(self) -> float:
         """現在の曲の再生経過秒数 (再生してない/停止直後は0)。"""
         if self._elapsed_started_at is not None:
-            return self._elapsed_base + (time.time() - self._elapsed_started_at)
+            return self._elapsed_base + (time.monotonic() - self._elapsed_started_at)
         return self._elapsed_base
 
     def seek(self, seconds: float):
@@ -482,14 +514,23 @@ class BGMPlayer:
         """
         if not self.library:
             return
+        if not math.isfinite(seconds):
+            print(f"[警告] シーク位置が不正です (有限の数値ではありません): {seconds}")
+            return
         seconds = max(0.0, seconds)
+        # 曲の長さが分かっていれば、その手前までに丸める
+        # (曲長を超える位置に飛ばすと環境によって無音のまま止まるため)
+        track = self.current_track()
+        duration = track.get("durationSec") if track else None
+        if duration:
+            seconds = min(seconds, max(0.0, duration - 0.5))
         try:
             pygame.mixer.music.set_pos(seconds)
         except Exception as e:
             print(f"[警告] シークに失敗しました (このファイル形式では非対応の可能性があります): {e}")
             return
         self._elapsed_base = seconds
-        self._elapsed_started_at = time.time() if self.playing else None
+        self._elapsed_started_at = time.monotonic() if self.playing else None
 
     def status(self) -> dict:
         """現在の再生状態をJSON化しやすい辞書で返す (外部API公開用)"""
@@ -501,7 +542,6 @@ class BGMPlayer:
             "total_tracks": len(self.library),
             "repeat": self.repeat,
             "restricted": self.restricted,
-            "restricted_active": self.restricted and self.allowed_ids is not None,
             "elapsed": round(self.elapsed_sec(), 1),
             "tracks": [
                 {"id": t["id"], "title": t["displayTitle"], "author": t["author"], "arranged": t["arranged"]}
@@ -527,7 +567,7 @@ class BGMPlayer:
                     pygame.mixer.music.unpause()
                 self.playing = True
                 self.paused = False
-                self._elapsed_started_at = time.time()
+                self._elapsed_started_at = time.monotonic()
             except Exception as e:
                 print(f"[警告] 再生に失敗しました: {e}")
                 self.playing = False
@@ -555,7 +595,7 @@ class BGMPlayer:
             try:
                 pygame.mixer.music.play()
                 self._elapsed_base = 0.0
-                self._elapsed_started_at = time.time()
+                self._elapsed_started_at = time.monotonic()
             except Exception as e:
                 print(f"[警告] リピート再生に失敗しました: {e}")
                 self.playing = False
@@ -600,7 +640,7 @@ class BGMPlayer:
                 self.playing = True
                 self.paused = False
                 self._elapsed_base = 0.0
-                self._elapsed_started_at = time.time()
+                self._elapsed_started_at = time.monotonic()
                 return
             pos = (pos + direction) % len(candidates)
         self.playing = False
@@ -636,7 +676,7 @@ class BGMPlayer:
                 self.playing = True
                 self.paused = False
                 self._elapsed_base = 0.0
-                self._elapsed_started_at = time.time()
+                self._elapsed_started_at = time.monotonic()
                 return True
         return False
 
@@ -956,6 +996,13 @@ class ProgramController:
             return
         if pygame.mixer.music.get_busy():
             return
+        if self.player.repeat:
+            # リピートONのときはプレイリストを進めず同じ曲を繰り返す。
+            # (BGMPlayer.tick()のリピート処理は、ここで先に次の曲を再生してしまうと
+            #  get_busy()がTrueになって到達しない。control.htmlの🔁ボタンが
+            #  プレイリスト再生中だけ無反応になるのを防ぐため、ここで面倒を見る)
+            self.player.play_by_id(self.bgm_queue[self.bgm_pos])
+            return
         if not self.active_playlist_loops and self.bgm_pos + 1 >= len(self.bgm_queue):
             self.player.stop()
             self.bgm_queue = []
@@ -1054,6 +1101,10 @@ class ProgramController:
 # 制御画面と共有できないため、main.py側のHTTP APIを経由して状態をやり取りする。
 # control.html から書き込み、monitor1/2.html はポーリングで読み取って反映する。
 # ------------------------------------------------------------
+class CalibValidationError(ValueError):
+    """/calib に想定外の値が来たことを表す (400で返すためのマーカー)"""
+
+
 class CalibStore:
     FILE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "calib_state.json")
     DEFAULT = {
@@ -1088,13 +1139,37 @@ class CalibStore:
         with self.lock:
             return json.loads(json.dumps(self.state))
 
+    # 受け付ける値の範囲。ここを抜けた値を保存すると display-common.js の
+    # pxPerCm() が NaN になり、配信画面の文字サイズが NaNpx になって文字が消える。
+    # しかも calib_state.json に永続化されるので再起動しても直らない。
+    LIMITS = {"heightCm": (5.0, 500.0), "yOffsetPx": (-10000.0, 10000.0)}
+
+    @classmethod
+    def _validate(cls, key, value):
+        lo, hi = cls.LIMITS[key]
+        # boolはintのサブクラスなので明示的に弾く
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise CalibValidationError(f"{key} は数値で指定してください")
+        value = float(value)
+        if not math.isfinite(value):
+            raise CalibValidationError(f"{key} は有限の数値で指定してください")
+        if not (lo <= value <= hi):
+            raise CalibValidationError(f"{key} は {lo}〜{hi} の範囲で指定してください")
+        return int(value) if key == "yOffsetPx" else value
+
     def update(self, monitor: str, patch: dict):
         with self.lock:
             if monitor not in self.state:
                 return None
-            for key in ("heightCm", "yOffsetPx"):
-                if key in patch:
-                    self.state[monitor][key] = patch[key]
+            for key in self.LIMITS:
+                if key not in patch:
+                    continue
+                value = patch[key]
+                # heightCm の null は「未キャリブレートに戻す」の意味で受け付ける
+                if value is None and key == "heightCm":
+                    self.state[monitor][key] = None
+                    continue
+                self.state[monitor][key] = self._validate(key, value)
             self._save()
             return json.loads(json.dumps(self.state))
 
@@ -1128,18 +1203,75 @@ def make_now_playing_server(
     }
 
     class Handler(BaseHTTPRequestHandler):
+        MAX_BODY_BYTES = 64 * 1024
+
         def _send_json(self, obj, status=200):
             body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Access-Control-Allow-Origin", "*")
+            # 参照系(GET)は他オリジンのOBS/自作ダッシュボードから読めるよう * のまま。
+            # 更新系(POST)には付けない (許可すると外部ページから結果を読めてしまう)。
+            if self.command == "GET":
+                self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
 
+        def _origin_ok(self) -> bool:
+            """ブラウザからのクロスサイトな更新リクエスト(CSRF)を弾く。
+
+            Originヘッダが無い場合(curl等の非ブラウザ)は許可し、ある場合は
+            自分自身のHostと一致するときだけ許可する。LAN内の別端末から
+            http://<このPCのIP>:8787/control.html を開いた場合も Origin と Host は
+            一致するので通る (127.0.0.1 固定にはしない)。
+            """
+            origin = self.headers.get("Origin")
+            if not origin:
+                return True
+            try:
+                return urlsplit(origin).netloc.lower() == (self.headers.get("Host") or "").lower()
+            except Exception:
+                return False
+
+        def _read_json_body(self):
+            """POSTボディをJSONとして読む。
+
+            問題があればエラーレスポンスを送信済みにしてNoneを返す
+            (呼び出し側は None なら何もせず return するだけでよい)。
+            """
+            ctype = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+            if ctype != "application/json":
+                # Content-Typeを必須にすると、他オリジンからのPOSTがプリフライトを
+                # 強制され do_OPTIONS の同一オリジン判定を通らなくなる (CSRF対策)。
+                self._send_json({"error": "Content-Type: application/json が必要です"}, status=415)
+                return None
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+            except ValueError:
+                self._send_json({"error": "Content-Length が不正です"}, status=400)
+                return None
+            if length > self.MAX_BODY_BYTES:
+                self._send_json({"error": "リクエストボディが大きすぎます"}, status=413)
+                return None
+            try:
+                raw = self.rfile.read(length) if length > 0 else b"{}"
+                return json.loads(raw.decode("utf-8"))
+            except Exception as e:
+                self._send_json({"error": str(e)}, status=400)
+                return None
+
         def do_OPTIONS(self):
+            # プリフライトも同一オリジンのときだけ許可する。
+            # ここで * を返すと、Content-Type必須にしたPOSTが他オリジンから通ってしまう。
+            if not self._origin_ok():
+                self.send_response(403)
+                self.end_headers()
+                return
             self.send_response(204)
-            self.send_header("Access-Control-Allow-Origin", "*")
+            origin = self.headers.get("Origin")
+            if origin:
+                self.send_header("Access-Control-Allow-Origin", origin)
+                self.send_header("Vary", "Origin")
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Content-Type")
             self.end_headers()
@@ -1167,6 +1299,7 @@ def make_now_playing_server(
             ".css": "text/css; charset=utf-8",
         }
         STATIC_DIR = os.path.dirname(os.path.abspath(__file__))
+        STATIC_FILENAME_RE = re.compile(r"^[A-Za-z0-9_-]+\.[A-Za-z0-9]+$")
 
         def _serve_static(self):
             url_path = self.path.split("?", 1)[0]
@@ -1175,6 +1308,14 @@ def make_now_playing_server(
             filename = os.path.basename(url_path)
             ext = os.path.splitext(filename)[1].lower()
             file_path = os.path.join(self.STATIC_DIR, filename)
+
+            # basenameだけでもディレクトリ探索は防げるが、Windowsの代替データ
+            # ストリーム記法 (control.html:foo) 等を確実に弾くため、素朴な
+            # ファイル名の形をしているものだけ通す。
+            if not self.STATIC_FILENAME_RE.match(filename):
+                self.send_response(404)
+                self.end_headers()
+                return
 
             if ext not in self.STATIC_CONTENT_TYPES or not os.path.isfile(file_path):
                 self.send_response(404)
@@ -1190,48 +1331,55 @@ def make_now_playing_server(
             self.wfile.write(body)
 
         def do_POST(self):
+            # 更新系はまずCSRF(他サイトからの勝手なPOST)を弾く。
+            if not self._origin_ok():
+                self._send_json({"error": "cross-origin request rejected"}, status=403)
+                return
+
             if self.path == "/calib":
+                payload = self._read_json_body()
+                if payload is None:
+                    return
                 try:
-                    length = int(self.headers.get("Content-Length", 0))
-                    raw = self.rfile.read(length) if length else b"{}"
-                    payload = json.loads(raw.decode("utf-8"))
-                    monitor = str(payload.get("monitor"))
-                    updated = calib_store.update(monitor, payload)
-                    if updated is None:
-                        self._send_json({"error": "invalid monitor"}, status=400)
-                    else:
-                        self._send_json(updated)
-                except Exception as e:
+                    updated = calib_store.update(str(payload.get("monitor")), payload)
+                except CalibValidationError as e:
                     self._send_json({"error": str(e)}, status=400)
+                    return
+                if updated is None:
+                    self._send_json({"error": "invalid monitor"}, status=400)
+                else:
+                    self._send_json(updated)
             elif self.path == "/command":
                 if command_queue is None:
                     self._send_json({"error": "command queue unavailable"}, status=503)
                     return
-                try:
-                    length = int(self.headers.get("Content-Length", 0))
-                    raw = self.rfile.read(length) if length else b"{}"
-                    payload = json.loads(raw.decode("utf-8"))
-                    command = payload.get("command")
-                    if command not in VALID_COMMANDS:
-                        self._send_json({"error": "invalid command"}, status=400)
-                    else:
-                        command_queue.put(command)
-                        self._send_json({"queued": command}, status=202)
-                except Exception as e:
-                    self._send_json({"error": str(e)}, status=400)
+                payload = self._read_json_body()
+                if payload is None:
+                    return
+                command = payload.get("command")
+                if command not in VALID_COMMANDS:
+                    self._send_json({"error": "invalid command"}, status=400)
+                else:
+                    command_queue.put(command)
+                    self._send_json({"queued": command}, status=202)
             elif self.path == "/seek":
                 if command_queue is None:
                     self._send_json({"error": "command queue unavailable"}, status=503)
                     return
+                payload = self._read_json_body()
+                if payload is None:
+                    return
                 try:
-                    length = int(self.headers.get("Content-Length", 0))
-                    raw = self.rfile.read(length) if length else b"{}"
-                    payload = json.loads(raw.decode("utf-8"))
                     seconds = float(payload.get("seconds"))
-                    command_queue.put(f"SEEK:{seconds}")
-                    self._send_json({"queued": "SEEK"}, status=202)
-                except Exception as e:
-                    self._send_json({"error": str(e)}, status=400)
+                except (TypeError, ValueError):
+                    self._send_json({"error": "seconds には数値を指定してください"}, status=400)
+                    return
+                # inf/nan は float() を通過してしまうので明示的に弾く
+                if not math.isfinite(seconds):
+                    self._send_json({"error": "seconds には有限の数値を指定してください"}, status=400)
+                    return
+                command_queue.put(f"SEEK:{seconds}")
+                self._send_json({"queued": "SEEK"}, status=202)
             elif self.path == "/program/advance":
                 if program is None or command_queue is None:
                     self._send_json({"error": "program not enabled (--program を指定してください)"}, status=400)
@@ -1254,18 +1402,15 @@ def make_now_playing_server(
                 if program is None or command_queue is None:
                     self._send_json({"error": "program not enabled (--program を指定してください)"}, status=400)
                 else:
-                    try:
-                        length = int(self.headers.get("Content-Length", 0))
-                        raw = self.rfile.read(length) if length else b"{}"
-                        payload = json.loads(raw.decode("utf-8"))
-                        track_id = payload.get("trackId")
-                        if not track_id:
-                            self._send_json({"error": "trackId を指定してください"}, status=400)
-                        else:
-                            command_queue.put(f"PROGRAM_PLAY_TRACK:{track_id}")
-                            self._send_json({"queued": "PROGRAM_PLAY_TRACK"}, status=202)
-                    except Exception as e:
-                        self._send_json({"error": str(e)}, status=400)
+                    payload = self._read_json_body()
+                    if payload is None:
+                        return
+                    track_id = payload.get("trackId")
+                    if not track_id or not isinstance(track_id, str):
+                        self._send_json({"error": "trackId を指定してください"}, status=400)
+                    else:
+                        command_queue.put(f"PROGRAM_PLAY_TRACK:{track_id}")
+                        self._send_json({"queued": "PROGRAM_PLAY_TRACK"}, status=202)
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -1355,7 +1500,12 @@ def start_bgm_library(tracks_dir: str, program_file: str | None):
         env["PROGRAM_FILE"] = os.path.abspath(program_file)
 
     try:
-        proc = subprocess.Popen([node_cmd, "server.js"], cwd=BGM_LIBRARY_DIR, env=env)
+        # POSIXでは自分のプロセスグループを持たせ、終了時にツリーごと止められるようにする
+        # (Windowsは終了側で taskkill /T を使うのでここでは何もしない)
+        popen_kwargs = {} if sys.platform == "win32" else {"start_new_session": True}
+        proc = subprocess.Popen(
+            [node_cmd, "server.js"], cwd=BGM_LIBRARY_DIR, env=env, **popen_kwargs
+        )
         print("[bgm-library] 自動起動しました (http://127.0.0.1:4000)")
         return proc
     except Exception as e:
@@ -1364,9 +1514,27 @@ def start_bgm_library(tracks_dir: str, program_file: str | None):
 
 
 def stop_bgm_library(proc):
+    """bgm-library を、その子プロセスごと終了させる。
+
+    proc.terminate() は node 本体しか止めないため、server.js が起動した
+    yt-dlp / demucs (Python) が孤児として残り、GPU/CPUを掴んだまま走り続ける。
+    """
     if proc is None or proc.poll() is not None:
         return
-    proc.terminate()
+    if sys.platform == "win32":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                capture_output=True, timeout=10,
+            )
+        except Exception as e:
+            print(f"[警告] bgm-library のプロセスツリーを終了できませんでした: {e}")
+            proc.terminate()
+    else:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except Exception:
+            proc.terminate()
     try:
         proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
@@ -1434,7 +1602,12 @@ def main():
         bgm_library_proc = start_bgm_library(args.dir, args.program)
     _mark("bgm-library 起動")
 
-    player = BGMPlayer(args.dir)
+    try:
+        player = BGMPlayer(args.dir)
+    except RuntimeError as e:
+        print(f"[エラー] {e}")
+        stop_bgm_library(bgm_library_proc)
+        sys.exit(1)
     _mark("トラック読み込み (BGMPlayer)")
     recognizer = GestureRecognizer(cooldown_sec=args.cooldown)
 
@@ -1540,11 +1713,10 @@ def main():
 
                 if result.multi_hand_landmarks and result.multi_handedness:
                     hand_landmarks = result.multi_hand_landmarks[0]
-                    handedness_label = result.multi_handedness[0].classification[0].label
 
                     mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
 
-                    gesture = recognizer.recognize(hand_landmarks.landmark, handedness_label)
+                    gesture = recognizer.recognize(hand_landmarks.landmark)
                     stable_gesture = recognizer.stabilize(gesture)
 
                     if recognizer.fire(stable_gesture):
@@ -1569,10 +1741,12 @@ def main():
                 # 画面にステータス表示 (日本語ファイル名も文字化けしないようPILで描画)
                 header_h = 100 if program else 70
                 cv2.rectangle(frame, (0, 0), (frame.shape[1], header_h), (0, 0, 0), -1)
-                draw_text_ja(frame, f"Track: {player.current_name()}", (10, 8),
-                             font_size=20, color=(255, 255, 255))
-                draw_text_ja(frame, f"Status: {status_text}  Vol: {int(player.volume * 100)}%", (10, 38),
-                             font_size=20, color=(0, 255, 0))
+                # 1行ずつ描画するとフレーム全体の色空間変換が行数分だけ走るので、
+                # 表示する行を組み立ててから draw_texts_ja で1回にまとめて描く。
+                overlay_lines = [
+                    (f"Track: {player.current_name()}", (10, 8), 20, (255, 255, 255)),
+                    (f"Status: {status_text}  Vol: {int(player.volume * 100)}%", (10, 38), 20, (0, 255, 0)),
+                ]
                 if program:
                     p_status = program.status()
                     if p_status["mode"] == "ready":
@@ -1582,8 +1756,8 @@ def main():
                         program_line = f"上演中: {p_status['current_item']}"
                     else:
                         program_line = f"転換中 -> {p_status['next_item']}"
-                    draw_text_ja(frame, f"次第: {program_line}", (10, 68),
-                                 font_size=20, color=(0, 255, 255))
+                    overlay_lines.append((f"次第: {program_line}", (10, 68), 20, (0, 255, 255)))
+                draw_texts_ja(frame, overlay_lines)
 
                 cv2.imshow("BGM Hand Sign Player (q to quit, n: next item, b: back)", frame)
                 key = cv2.waitKey(1) & 0xFF
