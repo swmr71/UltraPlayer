@@ -634,8 +634,10 @@ function renderBgmPicker(item, idx, playlistField, trackField, playlistById, lib
     ? `tr:${item[trackField]}`
     : (item[playlistField] ? `pl:${item[playlistField]}` : "");
 
+  // 選択肢は(伏字にできる)表示用曲名ではなく内部の曲名で出す。運営がどの曲か
+  // 確実に見分けて選べるようにするため(他の曲選択UIと同じ挙動に揃える)。
   const trackOptions = library.map(t =>
-    `<option value="tr:${t.id}" ${selectedValue === `tr:${t.id}` ? "selected" : ""}>${escapeHtml(t.displayTitle)}</option>`
+    `<option value="tr:${t.id}" ${selectedValue === `tr:${t.id}` ? "selected" : ""}>${escapeHtml(t.title)}</option>`
   ).join("");
   const playlistOptions = playlists.map(p =>
     `<option value="pl:${p.id}" ${selectedValue === `pl:${p.id}` ? "selected" : ""}>${escapeHtml(p.name)}</option>`
@@ -645,7 +647,7 @@ function renderBgmPicker(item, idx, playlistField, trackField, playlistById, lib
   const selectedTrack = item[trackField] ? libraryById[item[trackField]] : null;
   const selectedPlaylist = item[playlistField] ? playlistById[item[playlistField]] : null;
   if (selectedTrack) {
-    previewHtml = `<div class="playlist-preview">${escapeHtml(selectedTrack.displayTitle)}</div>`;
+    previewHtml = `<div class="playlist-preview">${escapeHtml(selectedTrack.title)}</div>`;
   } else if (item[trackField]) {
     previewHtml = `<div class="playlist-preview empty">(曲が見つかりません: ${escapeHtml(item[trackField])})</div>`;
   } else if (selectedPlaylist) {
