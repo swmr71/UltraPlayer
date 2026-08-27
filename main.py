@@ -390,8 +390,18 @@ class BGMPlayer:
             for p in paths
         ]
 
-    def _load_current(self):
-        pygame.mixer.music.load(self.library[self.index]["path"])
+    def _load_current(self) -> bool:
+        """現在のインデックスの曲をロードする。壊れたファイルなど
+        (pygame.error 等)が原因で失敗しても例外を外に出さずFalseを返す。
+        本番中にこの1曲のせいでアプリ全体が落ちるのを防ぐため。
+        """
+        try:
+            pygame.mixer.music.load(self.library[self.index]["path"])
+            return True
+        except Exception as e:
+            path = self.library[self.index]["path"]
+            print(f"[警告] 曲を読み込めませんでした (ファイルが壊れている可能性があります): {path} ({e})")
+            return False
 
     def current_track(self):
         if not self.library:
@@ -437,11 +447,15 @@ class BGMPlayer:
             pygame.mixer.music.pause()
             self.playing = False
         else:
-            if pygame.mixer.music.get_pos() == -1:
-                pygame.mixer.music.play()
-            else:
-                pygame.mixer.music.unpause()
-            self.playing = True
+            try:
+                if pygame.mixer.music.get_pos() == -1:
+                    pygame.mixer.music.play()
+                else:
+                    pygame.mixer.music.unpause()
+                self.playing = True
+            except Exception as e:
+                print(f"[警告] 再生に失敗しました: {e}")
+                self.playing = False
 
     def stop(self):
         pygame.mixer.music.stop()
@@ -458,7 +472,11 @@ class BGMPlayer:
         if pygame.mixer.music.get_busy():
             return
         if self.repeat:
-            pygame.mixer.music.play()
+            try:
+                pygame.mixer.music.play()
+            except Exception as e:
+                print(f"[警告] リピート再生に失敗しました: {e}")
+                self.playing = False
         else:
             self.playing = False
 
@@ -486,10 +504,16 @@ class BGMPlayer:
             pos = (candidates.index(self.index) + direction) % len(candidates)
         else:
             pos = 0 if direction > 0 else -1
-        self.index = candidates[pos]
-        self._load_current()
-        pygame.mixer.music.play()
-        self.playing = True
+        # 壊れたファイル等で読み込みに失敗したら、無限ループしないよう
+        # 候補の数だけ試して次へスキップする(全滅なら諦めて無音のまま止める)。
+        for _ in range(len(candidates)):
+            self.index = candidates[pos]
+            if self._load_current():
+                pygame.mixer.music.play()
+                self.playing = True
+                return
+            pos = (pos + direction) % len(candidates)
+        self.playing = False
 
     def next_track(self):
         self._navigate(1)
@@ -506,11 +530,16 @@ class BGMPlayer:
         pygame.mixer.music.set_volume(self.volume)
 
     def play_by_id(self, track_id: str) -> bool:
-        """曲idを指定して再生する (行事プログラムの転換BGM用)"""
+        """曲idを指定して再生する (行事プログラムの転換BGM用)。
+        ファイルが壊れている等でロードに失敗した場合はFalseを返す
+        (呼び出し側で「見つかりません」と同じ扱いで警告される)。
+        """
         for i, t in enumerate(self.library):
             if t["id"] == track_id:
                 self.index = i
-                self._load_current()
+                if not self._load_current():
+                    self.playing = False
+                    return False
                 pygame.mixer.music.play()
                 self.playing = True
                 return True
@@ -1321,12 +1350,16 @@ def main():
                     recognizer.stabilize(None)
                     recognizer.fire(None)
 
-                drain_command_queue()
-
-                if program:
-                    program.tick()
-                    player.allowed_ids = set(program.active_playlist_ids())
-                player.tick()
+                try:
+                    drain_command_queue()
+                    if program:
+                        program.tick()
+                        player.allowed_ids = set(program.active_playlist_ids())
+                    player.tick()
+                except Exception as e:
+                    # 本番中にここで想定外の例外(壊れたファイル等)が飛んでも
+                    # プロセス全体を落とさず、警告だけ出して進行を続ける。
+                    print(f"[エラー] 予期しない問題が発生しましたが、続行します: {e}")
 
                 # 画面にステータス表示 (日本語ファイル名も文字化けしないようPILで描画)
                 header_h = 100 if program else 70
@@ -1363,11 +1396,16 @@ def main():
         print("[INFO] Ctrl+C で終了します。")
         try:
             while True:
-                drain_command_queue()
-                if program:
-                    program.tick()
-                    player.allowed_ids = set(program.active_playlist_ids())
-                player.tick()
+                try:
+                    drain_command_queue()
+                    if program:
+                        program.tick()
+                        player.allowed_ids = set(program.active_playlist_ids())
+                    player.tick()
+                except Exception as e:
+                    # 本番中にここで想定外の例外(壊れたファイル等)が飛んでも
+                    # プロセス全体を落とさず、警告だけ出して進行を続ける。
+                    print(f"[エラー] 予期しない問題が発生しましたが、続行します: {e}")
                 time.sleep(0.05)
         except KeyboardInterrupt:
             pass
