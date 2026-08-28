@@ -209,7 +209,7 @@ async function poll() {
   // 描画の失敗を通信エラー表示にはしない。ここを一緒くたにすると、
   // 表示のバグが「main.pyが落ちている」ように見えて切り分けができない。
   safe("描画", () => {
-    if (data.mode === "performing" && data.video) {
+    if ((data.mode === "performing" || data.mode === "transition") && data.video) {
       showVideo(data);
       return;
     }

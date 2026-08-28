@@ -858,36 +858,39 @@ function buildProgramBlocks() {
   return blocks;
 }
 
-function renderVideoPicker(item, idx) {
+// videoIdField/sideField/mutedField/syncField を差し替えることで、転換用と
+// 上演中用の両方に使い回せるようにしている(renderBgmPickerと同じ考え方)。
+function renderVideoPicker(item, idx, videoIdField, sideField, mutedField, syncField) {
+  const videoId = item[videoIdField];
   const options = videos.map(v =>
-    `<option value="${v.id}" ${item.performingVideoId === v.id ? "selected" : ""}>${escapeHtml(v.title)}</option>`
+    `<option value="${v.id}" ${videoId === v.id ? "selected" : ""}>${escapeHtml(v.title)}</option>`
   ).join("");
-  const hasVideo = Boolean(item.performingVideoId);
-  const selected = hasVideo ? videos.find(v => v.id === item.performingVideoId) : null;
+  const hasVideo = Boolean(videoId);
+  const selected = hasVideo ? videos.find(v => v.id === videoId) : null;
   const previewHtml = hasVideo
     ? (selected
         ? `<div class="playlist-preview">${escapeHtml(selected.title)}</div>`
-        : `<div class="playlist-preview empty">(動画が見つかりません: ${escapeHtml(item.performingVideoId)})</div>`)
+        : `<div class="playlist-preview empty">(動画が見つかりません: ${escapeHtml(videoId)})</div>`)
     : `<div class="playlist-preview empty">(動画なし)</div>`;
 
   return `
-    <select data-idx="${idx}" data-field="performingVideoId" data-simple-field>
+    <select data-idx="${idx}" data-field="${videoIdField}" data-simple-field>
       <option value="">(動画なし)</option>
       ${options}
     </select>
     ${previewHtml}
     <div class="video-options" style="${hasVideo ? "" : "display:none;"}">
       <label class="playlist-picker-label">動画を表示するモニター(もう片方には演目名/BGM情報を表示)</label>
-      <select data-idx="${idx}" data-field="videoSide" data-simple-field>
-        <option value="left" ${item.videoSide !== "right" ? "selected" : ""}>左 (MONITOR 1)</option>
-        <option value="right" ${item.videoSide === "right" ? "selected" : ""}>右 (MONITOR 2)</option>
+      <select data-idx="${idx}" data-field="${sideField}" data-simple-field>
+        <option value="left" ${item[sideField] !== "right" ? "selected" : ""}>左 (MONITOR 1)</option>
+        <option value="right" ${item[sideField] === "right" ? "selected" : ""}>右 (MONITOR 2)</option>
       </select>
       <label style="display:block;margin-top:6px;">
-        <input type="checkbox" data-idx="${idx}" data-field="videoMuted" style="width:auto;display:inline-block;vertical-align:middle;" ${item.videoMuted ? "checked" : ""} />
+        <input type="checkbox" data-idx="${idx}" data-field="${mutedField}" style="width:auto;display:inline-block;vertical-align:middle;" ${item[mutedField] ? "checked" : ""} />
         動画の音声をミュートする(BGMだけ聞かせたい場合。未チェックなら動画の音もそのまま流れる)
       </label>
       <label style="display:block;margin-top:6px;">
-        <input type="checkbox" data-idx="${idx}" data-field="videoSyncPlayback" style="width:auto;display:inline-block;vertical-align:middle;" ${item.videoSyncPlayback !== false ? "checked" : ""} />
+        <input type="checkbox" data-idx="${idx}" data-field="${syncField}" style="width:auto;display:inline-block;vertical-align:middle;" ${item[syncField] !== false ? "checked" : ""} />
         BGMの再生/一時停止に動画も連動させる(未チェックなら動画は独立して再生し続ける)
       </label>
     </div>
@@ -910,6 +913,8 @@ function renderProgramItemRow(item, i, playlistById, libraryById) {
       <input type="text" class="section-field" value="${escapeAttr(item.section || "")}" data-idx="${i}" data-field="section" placeholder="例: 第一部" />
       <label class="playlist-picker-label">転換に使う曲/プレイリスト (この演目に入るとき)</label>
       ${renderBgmPicker(item, i, "playlistId", "trackId", playlistById, libraryById, legacyBgm)}
+      <label class="playlist-picker-label">転換中に流す動画 (この演目に入るとき)</label>
+      ${renderVideoPicker(item, i, "videoId", "videoSide", "videoMuted", "videoSyncPlayback")}
       <label class="playlist-picker-label">上演中に流す曲/プレイリスト (この演目の間ずっと)</label>
       ${renderBgmPicker(item, i, "performingPlaylistId", "performingTrackId", playlistById, libraryById, null)}
       <label style="display:block;margin-top:6px;">
@@ -917,7 +922,7 @@ function renderProgramItemRow(item, i, playlistById, libraryById) {
         上演開始と同時にBGMを自動再生する (未チェック: 頭出しだけして、▶を押すまで鳴らさない)
       </label>
       <label class="playlist-picker-label">上演中に流す動画 (この演目の間ずっと)</label>
-      ${renderVideoPicker(item, i)}
+      ${renderVideoPicker(item, i, "performingVideoId", "performingVideoSide", "performingVideoMuted", "performingVideoSyncPlayback")}
     </div>
     <button class="secondary" data-up="${i}" type="button">↑</button>
     <button class="secondary" data-down="${i}" type="button">↓</button>

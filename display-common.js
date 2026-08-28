@@ -182,9 +182,9 @@ function layoutTransition(data) {
   fitTrackName(window.innerWidth);
 }
 
-// 上演中の演目に動画が割り当てられ、かつこのモニターがその表示側かどうか。
+// 転換中/上演中の演目に動画が割り当てられ、かつこのモニターがその表示側かどうか。
 function monitorShowsVideo(data) {
-  return data.mode === "performing" && data.video &&
+  return (data.mode === "performing" || data.mode === "transition") && data.video &&
     ((data.video.side === "left" && MONITOR === 1) || (data.video.side === "right" && MONITOR === 2));
 }
 
@@ -226,13 +226,13 @@ function layoutVideoSide(data) {
 
 function render(data) {
   if (!data) return;
+  if (monitorShowsVideo(data)) {
+    layoutVideoSide(data);
+    return;
+  }
   if (data.mode === "transition") {
     hideVideo();
     layoutTransition(data);
-    return;
-  }
-  if (monitorShowsVideo(data)) {
-    layoutVideoSide(data);
     return;
   }
   hideVideo();

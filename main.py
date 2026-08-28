@@ -953,13 +953,13 @@ class ProgramController:
             return [track_id]
         return []
 
-    def _performing_video(self, item: dict):
-        """上演中に流す動画の外部公開用情報。演目に performingVideoId が
+    def _video_info(self, item: dict, id_field: str, side_field: str, muted_field: str, sync_field: str):
+        """転換用・上演中用共通の動画情報取り出し処理。演目に <id_field> が
         割り当てられ、videos.json 上に実際に存在する場合のみ辞書を返す
-        (それ以外はNone)。videoSide/videoMuted/videoSyncPlaybackは
+        (それ以外はNone)。<side_field>/<muted_field>/<sync_field>は
         bgm-libraryの次第編集画面で演目ごとに設定する。
         """
-        video_id = item.get("performingVideoId")
+        video_id = item.get(id_field)
         if not video_id:
             return None
         video = self.videos.get(video_id)
@@ -968,10 +968,20 @@ class ProgramController:
         return {
             "title": video["displayTitle"],
             "url": f"/media/{video['filename']}",
-            "side": "right" if item.get("videoSide") == "right" else "left",
-            "muted": bool(item.get("videoMuted")),
-            "syncPlayback": item.get("videoSyncPlayback") is not False,
+            "side": "right" if item.get(side_field) == "right" else "left",
+            "muted": bool(item.get(muted_field)),
+            "syncPlayback": item.get(sync_field) is not False,
         }
+
+    def _transition_video(self, item: dict):
+        """転換中に流す動画の外部公開用情報 (videoId で割り当て)。"""
+        return self._video_info(item, "videoId", "videoSide", "videoMuted", "videoSyncPlayback")
+
+    def _performing_video(self, item: dict):
+        """上演中に流す動画の外部公開用情報 (performingVideoId で割り当て)。"""
+        return self._video_info(
+            item, "performingVideoId", "performingVideoSide", "performingVideoMuted", "performingVideoSyncPlayback"
+        )
 
     def _playlists_json_mtime(self):
         path = os.path.join(self.player.track_dir, "playlists.json")
@@ -1293,6 +1303,10 @@ class ProgramController:
             }
             if self.bgm_queue:
                 info["bgm"] = self.player.current_public()
+            video = self._transition_video(self.items[self.target_idx])
+            if video:
+                info["video"] = video
+                info["playing"] = self.player.playing
             return info
         info = {
             "mode": "performing",

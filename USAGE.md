@@ -210,9 +210,10 @@ last.fm APIキーは https://www.lastfm.jp/api/account/create で無料取得で
   あくまで管理画面の見た目を整理するための機能で、`program.json` には
   各演目の `section` フィールドとして保存されるだけ。実際の進行順序・
   再生ロジック(`main.py`)には一切影響しない
-- 各演目には「上演中に流す動画」も割り当てられる(bgm-libraryの「動画ライブラリ」
-  セクションでアップロード/YouTubeからダウンロードした動画から選ぶ)。動画を
-  割り当てると追加で以下を設定する
+- 各演目には「転換中に流す動画」「上演中に流す動画」の両方が(それぞれ独立に)
+  割り当てられる(bgm-libraryの「動画ライブラリ」セクションでアップロード/
+  YouTubeからダウンロードした動画から選ぶ)。動画を割り当てると追加で
+  以下を設定する(転換用・上演中用でそれぞれ別に設定できる)
   - **動画を表示するモニター**: 左(`monitor1.html`)/右(`monitor2.html`)の
     どちらか。動画を表示する側は演目名/BGM情報の代わりに画面いっぱいに動画が
     表示され、もう片方は従来通り演目名/BGM情報を表示する(`display.html`の
@@ -223,9 +224,9 @@ last.fm APIキーは https://www.lastfm.jp/api/account/create で無料取得で
     動画はブラウザ側の音声出力)なので、両方同時に鳴らすこと自体は可能。
     動画の音を消してBGMだけ聞かせたい場合はONにする
   - **BGMの再生/一時停止に動画も連動させる**: ON(既定)なら▶/⏸ボタンで
-    動画も一緒に再生/一時停止される(上演中BGMが無い演目でこれをONにすると、
-    誰も▶を押さない限り動画も再生されない点に注意)。OFFなら動画は読み込まれた
-    瞬間から自動再生を始め、BGMの操作とは独立してループし続ける
+    動画も一緒に再生/一時停止される(BGMが割り当てられていない演目でこれを
+    ONにすると、誰も▶を押さない限り動画も再生されない点に注意)。OFFなら
+    動画は読み込まれた瞬間から自動再生を始め、BGMの操作とは独立してループし続ける
   - 動画はループ再生される。1回流したら止める、という設定は無い
 - ブラウザの自動再生ポリシー上、音声ありの動画の自動再生は環境によっては
   ブロックされることがある。OBSのBrowser Sourceは比較的緩いが、実際の配信
@@ -347,7 +348,7 @@ last.fm APIキーは https://www.lastfm.jp/api/account/create で無料取得で
     - Monitor 2(右): 「再生中: 曲名」を小さく表示、その下にさらに小さく
       作者・編集音源・注記を表示(こちらも無ければ非表示)。BGMが無い
       (無音)転換中は「(無音転換)」とだけ表示される
-  - 上演中の演目に動画が割り当てられている場合: 割り当て先(`videoSide`)の
+  - 転換中/上演中の演目に動画が割り当てられている場合: 割り当て先(`videoSide`)の
     モニターは演目名/BGM情報の代わりに画面いっぱいに動画を表示し、もう片方は
     従来通り演目名/BGM情報を表示する(詳細は[行事の次第](#行事の次第-プログラム進行)参照)
 - **`display.html`**: 単体モニター用のシンプル版。上記と同様に作者・注記を
@@ -414,7 +415,7 @@ last.fm APIキーは https://www.lastfm.jp/api/account/create で無料取得で
 
 | メソッド | パス | 内容 |
 |---|---|---|
-| `GET` | `/now-playing` | 配信画面向け。`--program` 未使用時は `{track: {title, author, arranged, note?, durationSec?}, playing, volume, index, total_tracks, repeat, restricted, locked, elapsed, tracks}`。`elapsed`は現在の曲の再生経過秒数、`durationSec`は`bgm-library`が取得済みの場合のみ含まれる。使用時は開始前なら `{mode: "ready", starts_with: "transition"\|"performing", next_item}`、上演中なら `{mode: "performing", current_item, bgm?: {title, author, arranged, note?}, video?: {title, url, side, muted, syncPlayback}, playing?}`(上演中プレイリストがある演目のみ `bgm` を、動画が割り当てられた演目のみ `video`(と`playing`)を含む。`video.url` は `/media/<filename>` の相対パス)、転換中なら `{mode: "transition", next_item, bgm: {title, author, arranged, note?}}` |
+| `GET` | `/now-playing` | 配信画面向け。`--program` 未使用時は `{track: {title, author, arranged, note?, durationSec?}, playing, volume, index, total_tracks, repeat, restricted, locked, elapsed, tracks}`。`elapsed`は現在の曲の再生経過秒数、`durationSec`は`bgm-library`が取得済みの場合のみ含まれる。使用時は開始前なら `{mode: "ready", starts_with: "transition"\|"performing", next_item}`、上演中なら `{mode: "performing", current_item, bgm?: {title, author, arranged, note?}, video?: {title, url, side, muted, syncPlayback}, playing?}`、転換中なら `{mode: "transition", next_item, bgm?: {title, author, arranged, note?}, video?: {title, url, side, muted, syncPlayback}, playing?}`(BGMプレイリストがある演目のみ `bgm` を、動画が割り当てられた演目のみ `video`(と`playing`)を含む。`video.url` は `/media/<filename>` の相対パス) |
 | `GET` | `/media/<filename>` | 上演中に流す動画の配信用。HTTP Rangeリクエスト(部分取得・シーク)に対応。ファイル名は`videos.json`に登録されたものに限る(パストラバーサル・未登録拡張子は404) |
 | `GET` | `/admin/status` | 管理画面向け。`{player: <player.status()と同じ>, program: <programがあればadmin_status()、なければnull>}`。`program.admin_status()` は `status()` に `started`, `can_go_back`, `current_idx`, `total_items`, `items`(演目名一覧)を追加したもの。さらに転換中は `current_playlist`(`{id,title,author}` の配列)と `current_playlist_index`、それ以外は `upcoming_playlist`(次に進めると流れる予定のプレイリスト)を含む |
 | `POST` | `/command` | 再生操作。Body: `{"command": "PLAY_PAUSE"\|"STOP"\|"NEXT"\|"PREV"\|"VOL_UP"\|"VOL_DOWN"\|"REPEAT_TOGGLE"\|"RESTRICT_TOGGLE"}`。202で受理、内部のコマンドキューに積まれメインループで実行される |
@@ -450,7 +451,7 @@ last.fm APIキーは https://www.lastfm.jp/api/account/create で無料取得で
 | `PATCH` | `/api/playlists/:id` | プレイリスト編集 (`name`/`trackIds`/`note` の一部) |
 | `DELETE` | `/api/playlists/:id` | プレイリストを削除。行事の次第から参照中なら `warning` を返す |
 | `GET` | `/api/program` | 行事の次第を取得 |
-| `PUT` | `/api/program` | 行事の次第を保存。Body: `[{name, playlistId: 転換用プレイリストid\|null, trackId: 転換用の単曲id\|null, performingPlaylistId: 上演中用プレイリストid\|null, performingTrackId: 上演中用の単曲id\|null, performingAutoplay: 上演開始と同時に自動再生するか(既定false), performingVideoId: 上演中に流す動画id\|null, videoSide: "left"\|"right"(既定left), videoMuted: 動画の音声をミュートするか(既定false), videoSyncPlayback: BGMの再生/一時停止に動画も連動させるか(既定true)}, ...]` の配列。playlistIdとtrackId(performingPlaylistIdとperformingTrackId)はどちらか一方だけを指定する |
+| `PUT` | `/api/program` | 行事の次第を保存。Body: `[{name, playlistId: 転換用プレイリストid\|null, trackId: 転換用の単曲id\|null, performingPlaylistId: 上演中用プレイリストid\|null, performingTrackId: 上演中用の単曲id\|null, performingAutoplay: 上演開始と同時に自動再生するか(既定false), videoId: 転換中に流す動画id\|null, videoSide/videoMuted/videoSyncPlayback: 転換用動画の表示モニター("left"\|"right"、既定left)/ミュート(既定false)/BGM連動(既定true), performingVideoId: 上演中に流す動画id\|null, performingVideoSide/performingVideoMuted/performingVideoSyncPlayback: 上演中用動画の同様の設定}, ...]` の配列。playlistIdとtrackId(performingPlaylistIdとperformingTrackId)はどちらか一方だけを指定する |
 | `GET` | `/api/videos` | 動画ライブラリ一覧を返す |
 | `POST` | `/api/videos` | 動画ファイルアップロード (multipart/form-data: `file`, `title`, `displayTitle?`) |
 | `POST` | `/api/videos/from-youtube` | YouTubeから映像+音声をダウンロードして登録。Body: `{url, title, displayTitle?}`。音声のみのダウンロードより時間がかかる |
