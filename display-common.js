@@ -21,6 +21,8 @@ const statusBadge = document.getElementById("status-badge");
 const trackName = document.getElementById("track-name");
 const trackSub = document.getElementById("track-sub");
 const connError = document.getElementById("conn-error");
+const videoEl = document.getElementById("video-el");
+let lastVideoUrl = null;
 
 // 作者・「当方でBGM化(編集・二次利用)した音源」の注意書き・自由記述の注記を、
 // 曲名の下に小さく表示するための1行にまとめる (著作権表示・出典明記のため)。
@@ -180,12 +182,60 @@ function layoutTransition(data) {
   fitTrackName(window.innerWidth);
 }
 
+// 上演中の演目に動画が割り当てられ、かつこのモニターがその表示側かどうか。
+function monitorShowsVideo(data) {
+  return data.mode === "performing" && data.video &&
+    ((data.video.side === "left" && MONITOR === 1) || (data.video.side === "right" && MONITOR === 2));
+}
+
+// 動画側でなくなった/動画自体が無くなったときに元の演目名/曲名表示へ戻す。
+function hideVideo() {
+  if (videoEl.style.display === "none" || videoEl.style.display === "") return;
+  videoEl.pause();
+  videoEl.removeAttribute("src");
+  videoEl.load();
+  lastVideoUrl = null;
+  videoEl.style.display = "none";
+  stageEl.style.display = "";
+}
+
+// このモニターに動画を表示する側。#stageの演目名/曲名は隠し、画面いっぱいに
+// <video>を出す(もう片方のモニターは通常通り演目名/BGM情報を表示する)。
+function layoutVideoSide(data) {
+  stageEl.style.display = "none";
+  videoEl.style.display = "block";
+
+  const video = data.video;
+  if (lastVideoUrl !== video.url) {
+    videoEl.src = video.url;
+    videoEl.loop = true;
+    lastVideoUrl = video.url;
+  }
+  videoEl.muted = Boolean(video.muted);
+
+  if (video.syncPlayback) {
+    // BGMの再生/一時停止(data.playing)に動画も追従させる
+    if (data.playing && videoEl.paused) videoEl.play().catch(() => {});
+    if (!data.playing && !videoEl.paused) videoEl.pause();
+  } else if (videoEl.paused) {
+    // 連動させない設定の動画は、読み込んだら独立して再生し続ける
+    videoEl.play().catch(() => {});
+  }
+  appEl.classList.remove("paused");
+}
+
 function render(data) {
   if (!data) return;
   if (data.mode === "transition") {
+    hideVideo();
     layoutTransition(data);
     return;
   }
+  if (monitorShowsVideo(data)) {
+    layoutVideoSide(data);
+    return;
+  }
+  hideVideo();
   const info = extractNowPlaying(data);
   trackName.textContent = info.title ?? "";
   // 無音転換で水色にした文字色をここで必ず戻す

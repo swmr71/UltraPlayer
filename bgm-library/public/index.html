@@ -7,6 +7,8 @@
   body { font-family: "Segoe UI", "Meiryo", sans-serif; background: #1b1d23; color: #e8e8e8; margin: 0; padding: 24px; }
   h1 { font-size: 20px; margin-bottom: 4px; }
   h2 { font-size: 16px; margin-top: 32px; border-bottom: 1px solid #444; padding-bottom: 4px; }
+  h3 { font-size: 14px; margin-top: 20px; color: #ccc; }
+  .video-options { margin-top: 6px; padding-left: 10px; border-left: 2px solid #383b45; }
   section { max-width: 960px; margin: 0 auto; }
   .card { background: #262933; border-radius: 8px; padding: 16px; margin-top: 12px; }
   label { display: block; font-size: 12px; color: #aaa; margin-top: 8px; }
@@ -144,6 +146,38 @@
     </table>
   </div>
 
+  <h2>動画ライブラリ (上演中に流す動画)</h2>
+  <div class="card">
+    <p class="muted">演目の「上演中に流す動画」に割り当てられる動画素材を登録します。</p>
+
+    <h3 style="margin-top:0;">YouTubeからダウンロード</h3>
+    <label>YouTube URL</label>
+    <input type="text" id="yt-video-url" placeholder="https://www.youtube.com/watch?v=..." />
+    <div class="row-inline">
+      <button class="secondary" id="btn-yt-video-info" type="button">情報取得</button>
+    </div>
+    <label>動画名</label>
+    <input type="text" id="yt-video-title" placeholder="情報取得すると自動入力されます(編集可)" />
+    <label>表示名 (空欄なら動画名と同じ)</label>
+    <input type="text" id="yt-video-display" placeholder="" />
+    <button id="btn-yt-video-download" type="button">ダウンロードして動画ライブラリに追加</button>
+    <span class="muted" id="yt-video-download-status"></span>
+    <p class="muted" style="margin-top:8px;">著作権・利用規約の確認は利用者側の責任で行ってください。映像+音声のダウンロードのため、音声のみのダウンロードより時間がかかります。</p>
+
+    <h3>ファイルをアップロード</h3>
+    <label>動画ファイル (mp4 / webm / mov / mkv)</label>
+    <input type="file" id="f-video-file" accept=".mp4,.webm,.mov,.mkv" />
+    <label>動画名 (内部管理用)</label>
+    <input type="text" id="f-video-title" placeholder="例: オープニング映像" />
+    <label>表示名 (空欄なら動画名と同じ)</label>
+    <input type="text" id="f-video-display" placeholder="" />
+    <button id="btn-video-upload" type="button">アップロード</button>
+    <span class="muted" id="video-upload-status"></span>
+
+    <h3>登録済みの動画</h3>
+    <div id="video-list"></div>
+  </div>
+
   <h2>転換用プレイリスト</h2>
   <div class="card">
     <p class="muted">名前を付けたプレイリストを作っておき、下の「行事の次第」で各演目の転換に付け外しできます。同じプレイリストを複数の演目で使い回せます。</p>
@@ -164,6 +198,7 @@
 let library = [];
 let program = [];
 let playlists = [];
+let videos = [];
 
 // ------------------------------------------------------------
 // 試し聞き (/tracks-file/<filename> を1つの<audio>で再生する。
@@ -269,6 +304,72 @@ async function refreshPlaylists() {
   playlists = await fetchArray("/api/playlists");
   renderPlaylistManager();
   renderProgram();
+}
+
+async function refreshVideos() {
+  videos = await fetchArray("/api/videos");
+  renderVideoLibrary();
+  renderProgram();
+}
+
+// 動画の試し見。試し聞き(previewAudio)とは別に<video>を1つ持ち、
+// ボタンを押すたびに再生/一時停止をトグルする。
+const previewVideoEl = document.createElement("video");
+previewVideoEl.style.cssText = "display:block;max-width:100%;margin-top:8px;border-radius:6px;";
+previewVideoEl.controls = true;
+let previewVideoId = null;
+
+function toggleVideoPreview(id, container) {
+  const video = videos.find(v => v.id === id);
+  if (!video) return;
+  if (previewVideoId === id) {
+    stopVideoPreview();
+    return;
+  }
+  stopVideoPreview();
+  previewVideoEl.src = `/tracks-file/${encodeURIComponent(video.filename)}`;
+  container.appendChild(previewVideoEl);
+  previewVideoEl.play().catch(() => {});
+  previewVideoId = id;
+  renderVideoLibrary();
+}
+
+function stopVideoPreview() {
+  previewVideoEl.pause();
+  if (previewVideoEl.parentNode) previewVideoEl.parentNode.removeChild(previewVideoEl);
+  previewVideoId = null;
+}
+
+function renderVideoLibrary() {
+  const listEl = document.getElementById("video-list");
+  listEl.innerHTML = "";
+  videos.forEach(v => {
+    const row = document.createElement("div");
+    row.className = "playlist-card";
+    row.innerHTML = `
+      <div class="row-inline">
+        <button class="secondary" data-video-preview="${v.id}" type="button">${previewVideoId === v.id ? "■ 閉じる" : "▶ 試し見"}</button>
+        <strong>${escapeHtml(v.title)}</strong>
+      </div>
+      <div class="video-preview-slot"></div>
+      <button class="danger" data-video-remove="${v.id}" type="button">削除</button>
+    `;
+    listEl.appendChild(row);
+    row.querySelector("[data-video-preview]").addEventListener("click", () => {
+      toggleVideoPreview(v.id, row.querySelector(".video-preview-slot"));
+    });
+    row.querySelector("[data-video-remove]").addEventListener("click", async () => {
+      if (!confirm(`「${v.title}」を削除しますか?`)) return;
+      if (previewVideoId === v.id) stopVideoPreview();
+      const res = await fetch(`/api/videos/${v.id}`, { method: "DELETE" });
+      const data = await res.json();
+      if (data.warning) alert(data.warning);
+      await refreshVideos();
+    });
+  });
+  if (!videos.length) {
+    listEl.innerHTML = `<p class="muted">登録済みの動画はありません。</p>`;
+  }
 }
 
 function renderLibrary() {
@@ -747,6 +848,42 @@ function buildProgramBlocks() {
   return blocks;
 }
 
+function renderVideoPicker(item, idx) {
+  const options = videos.map(v =>
+    `<option value="${v.id}" ${item.performingVideoId === v.id ? "selected" : ""}>${escapeHtml(v.title)}</option>`
+  ).join("");
+  const hasVideo = Boolean(item.performingVideoId);
+  const selected = hasVideo ? videos.find(v => v.id === item.performingVideoId) : null;
+  const previewHtml = hasVideo
+    ? (selected
+        ? `<div class="playlist-preview">${escapeHtml(selected.title)}</div>`
+        : `<div class="playlist-preview empty">(動画が見つかりません: ${escapeHtml(item.performingVideoId)})</div>`)
+    : `<div class="playlist-preview empty">(動画なし)</div>`;
+
+  return `
+    <select data-idx="${idx}" data-field="performingVideoId" data-simple-field>
+      <option value="">(動画なし)</option>
+      ${options}
+    </select>
+    ${previewHtml}
+    <div class="video-options" style="${hasVideo ? "" : "display:none;"}">
+      <label class="playlist-picker-label">動画を表示するモニター(もう片方には演目名/BGM情報を表示)</label>
+      <select data-idx="${idx}" data-field="videoSide" data-simple-field>
+        <option value="left" ${item.videoSide !== "right" ? "selected" : ""}>左 (MONITOR 1)</option>
+        <option value="right" ${item.videoSide === "right" ? "selected" : ""}>右 (MONITOR 2)</option>
+      </select>
+      <label style="display:block;margin-top:6px;">
+        <input type="checkbox" data-idx="${idx}" data-field="videoMuted" style="width:auto;display:inline-block;vertical-align:middle;" ${item.videoMuted ? "checked" : ""} />
+        動画の音声をミュートする(BGMだけ聞かせたい場合。未チェックなら動画の音もそのまま流れる)
+      </label>
+      <label style="display:block;margin-top:6px;">
+        <input type="checkbox" data-idx="${idx}" data-field="videoSyncPlayback" style="width:auto;display:inline-block;vertical-align:middle;" ${item.videoSyncPlayback !== false ? "checked" : ""} />
+        BGMの再生/一時停止に動画も連動させる(未チェックなら動画は独立して再生し続ける)
+      </label>
+    </div>
+  `;
+}
+
 function renderProgramItemRow(item, i, playlistById, libraryById) {
   const row = document.createElement("div");
   row.className = "program-item";
@@ -769,6 +906,8 @@ function renderProgramItemRow(item, i, playlistById, libraryById) {
         <input type="checkbox" data-idx="${i}" data-field="performingAutoplay" style="width:auto;display:inline-block;vertical-align:middle;" ${item.performingAutoplay ? "checked" : ""} />
         上演開始と同時にBGMを自動再生する (未チェック: 頭出しだけして、▶を押すまで鳴らさない)
       </label>
+      <label class="playlist-picker-label">上演中に流す動画 (この演目の間ずっと)</label>
+      ${renderVideoPicker(item, i)}
     </div>
     <button class="secondary" data-up="${i}" type="button">↑</button>
     <button class="secondary" data-down="${i}" type="button">↓</button>
@@ -889,6 +1028,13 @@ function renderProgram() {
     el.addEventListener("change", () => {
       const idx = Number(el.dataset.idx), field = el.dataset.field;
       program[idx][field] = el.checked;
+    });
+  });
+  container.querySelectorAll("select[data-simple-field]").forEach(el => {
+    el.addEventListener("change", () => {
+      const idx = Number(el.dataset.idx), field = el.dataset.field;
+      program[idx][field] = el.value || null;
+      renderProgram();
     });
   });
   container.querySelectorAll("button[data-remove]").forEach(btn => {
@@ -1021,6 +1167,72 @@ document.getElementById("btn-upload").addEventListener("click", async () => {
   await refreshLibrary();
 });
 
+document.getElementById("btn-yt-video-info").addEventListener("click", async () => {
+  const url = document.getElementById("yt-video-url").value.trim();
+  const statusEl = document.getElementById("yt-video-download-status");
+  if (!url) { statusEl.textContent = "URLを入力してください"; return; }
+  statusEl.textContent = "情報取得中...";
+  try {
+    const res = await fetch(`/api/youtube-info?url=${encodeURIComponent(url)}`);
+    const data = await res.json();
+    if (!res.ok) { statusEl.textContent = data.error || "取得に失敗しました"; return; }
+    document.getElementById("yt-video-title").value = data.title || "";
+    statusEl.textContent = "取得しました (動画名は必要に応じて編集してください)";
+  } catch (e) {
+    statusEl.textContent = "取得に失敗しました";
+  }
+});
+
+document.getElementById("btn-yt-video-download").addEventListener("click", async () => {
+  const status = document.getElementById("yt-video-download-status");
+  const url = document.getElementById("yt-video-url").value.trim();
+  const title = document.getElementById("yt-video-title").value.trim();
+  if (!url) { status.textContent = "URLを入力してください"; return; }
+  if (!title) { status.textContent = "動画名を入力してください"; return; }
+
+  status.textContent = "ダウンロード中... (映像付きのため数分かかる場合があります)";
+  try {
+    const res = await fetch("/api/videos/from-youtube", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        url,
+        title,
+        displayTitle: document.getElementById("yt-video-display").value.trim(),
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) { status.textContent = `失敗: ${data.error}`; return; }
+
+    status.textContent = "追加しました";
+    ["yt-video-url", "yt-video-title", "yt-video-display"].forEach(id => document.getElementById(id).value = "");
+    await refreshVideos();
+  } catch (e) {
+    status.textContent = "ダウンロードに失敗しました";
+  }
+});
+
+document.getElementById("btn-video-upload").addEventListener("click", async () => {
+  const status = document.getElementById("video-upload-status");
+  const fileInput = document.getElementById("f-video-file");
+  if (!fileInput.files[0]) { status.textContent = "ファイルを選択してください"; return; }
+
+  const fd = new FormData();
+  fd.append("file", fileInput.files[0]);
+  fd.append("title", document.getElementById("f-video-title").value.trim());
+  fd.append("displayTitle", document.getElementById("f-video-display").value.trim());
+
+  status.textContent = "アップロード中...";
+  const res = await fetch("/api/videos", { method: "POST", body: fd });
+  const data = await res.json();
+  if (!res.ok) { status.textContent = `失敗: ${data.error}`; return; }
+
+  status.textContent = "追加しました";
+  ["f-video-title", "f-video-display"].forEach(id => document.getElementById(id).value = "");
+  fileInput.value = "";
+  await refreshVideos();
+});
+
 function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
@@ -1076,6 +1288,7 @@ async function initStep(label, fn) {
   await initStep("実行中ジョブの復元", resumeActiveVocalJobs);
   await initStep("曲一覧の読み込み", refreshLibrary);
   await initStep("プレイリストの読み込み", refreshPlaylists);
+  await initStep("動画一覧の読み込み", refreshVideos);
   await initStep("行事の次第の読み込み", refreshProgram);
 })();
 </script>

@@ -59,6 +59,19 @@
     transition: opacity 0.3s;
   }
   #conn-error.show { opacity: 1; }
+
+  /* 1画面構成では左右に分けられないため、動画がある演目は画面いっぱいに動画を表示する
+     (演目名/BGM情報は動画を隠している間だけ非表示になる)。 */
+  #video-el {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    object-fit: contain;
+    background: #000;
+    display: none;
+  }
 </style>
 </head>
 <body>
@@ -67,6 +80,7 @@
   <div id="track-name">-</div>
   <div id="track-sub"></div>
 </div>
+<video id="video-el" playsinline></video>
 <div id="conn-error">接続待機中... (main.py が起動しているか確認してください)</div>
 
 <script>
@@ -78,6 +92,38 @@ const statusBadge = document.getElementById("status-badge");
 const trackName = document.getElementById("track-name");
 const trackSub = document.getElementById("track-sub");
 const connError = document.getElementById("conn-error");
+const videoEl = document.getElementById("video-el");
+let lastVideoUrl = null;
+
+// 1画面構成では動画を左右どちらかに寄せられないため、動画がある演目は
+// 画面いっぱいに動画を表示し、演目名/BGM情報は隠す。
+function showVideo(data) {
+  appEl.style.display = "none";
+  videoEl.style.display = "block";
+  const video = data.video;
+  if (lastVideoUrl !== video.url) {
+    videoEl.src = video.url;
+    videoEl.loop = true;
+    lastVideoUrl = video.url;
+  }
+  videoEl.muted = Boolean(video.muted);
+  if (video.syncPlayback) {
+    if (data.playing && videoEl.paused) videoEl.play().catch(() => {});
+    if (!data.playing && !videoEl.paused) videoEl.pause();
+  } else if (videoEl.paused) {
+    videoEl.play().catch(() => {});
+  }
+}
+
+function hideVideo() {
+  if (videoEl.style.display === "none" || videoEl.style.display === "") return;
+  videoEl.pause();
+  videoEl.removeAttribute("src");
+  videoEl.load();
+  lastVideoUrl = null;
+  videoEl.style.display = "none";
+  appEl.style.display = "";
+}
 
 // 作者・「当方でBGM化(編集・二次利用)した音源」の注意書き・自由記述の注記を、
 // 曲名の下に小さく表示するための1行にまとめる (著作権表示・出典明記のため)。
@@ -163,6 +209,11 @@ async function poll() {
   // 描画の失敗を通信エラー表示にはしない。ここを一緒くたにすると、
   // 表示のバグが「main.pyが落ちている」ように見えて切り分けができない。
   safe("描画", () => {
+    if (data.mode === "performing" && data.video) {
+      showVideo(data);
+      return;
+    }
+    hideVideo();
     const info = extractNowPlaying(data);
     trackName.textContent = info.title ?? "";
     trackName.style.color = info.titleColor || "";

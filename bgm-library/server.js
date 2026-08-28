@@ -42,6 +42,7 @@ const TRACKS_DIR = path.resolve(__dirname, process.env.TRACKS_DIR || "../tracks"
 const PROGRAM_FILE = path.resolve(__dirname, process.env.PROGRAM_FILE || "../program.json");
 const LIBRARY_FILE = path.join(TRACKS_DIR, "tracks.json");
 const PLAYLISTS_FILE = path.join(TRACKS_DIR, "playlists.json");
+const VIDEOS_FILE = path.join(TRACKS_DIR, "videos.json");
 
 const LASTFM_API_KEY = process.env.LASTFM_API_KEY || "";
 const YT_DLP_CMD = process.env.YT_DLP_CMD || "yt-dlp";
@@ -191,6 +192,24 @@ function savePlaylists(list) {
 }
 
 // ------------------------------------------------------------
+// 動画ライブラリ (videos.json) の読み書き
+// 上演中に流す動画を演目に割り当てるための素材一覧。tracks.jsonと同じ
+// TRACKS_DIR に保存し、/tracks-file で(音源と同様に)配信する。
+// ------------------------------------------------------------
+function loadVideos() {
+  if (!fs.existsSync(VIDEOS_FILE)) return [];
+  try {
+    return JSON.parse(fs.readFileSync(VIDEOS_FILE, "utf-8"));
+  } catch {
+    return [];
+  }
+}
+
+function saveVideos(list) {
+  writeJsonAtomic(VIDEOS_FILE, list);
+}
+
+// ------------------------------------------------------------
 // last.fm track.search (作者検索補助・任意)
 // APIキーは https://www.lastfm.jp/api/account/create で無料取得できる
 // (Premium等の契約は不要)。
@@ -244,6 +263,26 @@ async function downloadYoutubeAudio(url, id) {
   const filename = `${id}.mp3`;
   if (!fs.existsSync(path.join(TRACKS_DIR, filename))) {
     throw new Error("ダウンロードは完了しましたが、mp3ファイルが見つかりません");
+  }
+  return filename;
+}
+
+// 音声のみの downloadYoutubeAudio と違い、映像+音声をmp4にまとめてダウンロードする。
+async function downloadYoutubeVideo(url, id) {
+  await execFileAsync(
+    YT_DLP_CMD,
+    [
+      "-f", "bv*+ba/b",
+      "--merge-output-format", "mp4",
+      "--no-playlist",
+      "-o", `${id}.%(ext)s`,
+      url,
+    ],
+    { cwd: TRACKS_DIR, maxBuffer: 10 * 1024 * 1024, timeout: 20 * 60 * 1000 }
+  );
+  const filename = `${id}.mp4`;
+  if (!fs.existsSync(path.join(TRACKS_DIR, filename))) {
+    throw new Error("ダウンロードは完了しましたが、mp4ファイルが見つかりません");
   }
   return filename;
 }
@@ -440,6 +479,23 @@ const upload = multer({
   limits: { fileSize: 50 * 1024 * 1024 },
 });
 
+const ALLOWED_VIDEO_EXT = new Set([".mp4", ".webm", ".mov", ".mkv"]);
+
+const uploadVideo = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => cb(null, TRACKS_DIR),
+    filename: (req, file, cb) => {
+      const ext = path.extname(file.originalname).toLowerCase();
+      cb(null, `${uuidv4()}${ALLOWED_VIDEO_EXT.has(ext) ? ext : ".mp4"}`);
+    },
+  }),
+  fileFilter: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    cb(null, ALLOWED_VIDEO_EXT.has(ext));
+  },
+  limits: { fileSize: 500 * 1024 * 1024 },
+});
+
 // 曲一覧
 app.get("/api/tracks", (req, res) => {
   res.json(loadLibrary());
@@ -534,6 +590,96 @@ app.post("/api/tracks/from-youtube", asyncRoute(async (req, res) => {
   } catch (e) {
     res.status(502).json({ error: `ダウンロードに失敗しました: ${String(e.message || e)}` });
   }
+}));
+
+// 動画一覧
+app.get("/api/videos", (req, res) => {
+  res.json(loadVideos());
+});
+
+// 動画アップロード
+app.post("/api/videos", uploadVideo.single("file"), asyncRoute(async (req, res) => {
+  if (!req.file) {
+    res.status(400).json({ error: "動画ファイル(mp4/webm/mov/mkv)を指定してください" });
+    return;
+  }
+  const title = (req.body.title || "").trim();
+  if (!title) {
+    fs.unlink(req.file.path, () => {});
+    res.status(400).json({ error: "動画名を入力してください" });
+    return;
+  }
+
+  const entry = {
+    id: path.parse(req.file.filename).name,
+    filename: req.file.filename,
+    title,
+    displayTitle: (req.body.displayTitle || "").trim() || title,
+    createdAt: new Date().toISOString(),
+  };
+
+  await withLock(() => {
+    const videos = loadVideos();
+    videos.push(entry);
+    saveVideos(videos);
+  });
+  res.status(201).json(entry);
+}));
+
+// YouTube動画から映像+音声をダウンロードして動画ライブラリに登録
+app.post("/api/videos/from-youtube", asyncRoute(async (req, res) => {
+  const url = (req.body.url || "").trim();
+  const title = (req.body.title || "").trim();
+  if (!url || !isYoutubeUrl(url)) {
+    res.status(400).json({ error: "有効なYouTubeのURLを指定してください" });
+    return;
+  }
+  if (!title) {
+    res.status(400).json({ error: "動画名を入力してください" });
+    return;
+  }
+
+  const id = uuidv4();
+  try {
+    const filename = await downloadYoutubeVideo(url, id);
+    const entry = {
+      id,
+      filename,
+      title,
+      displayTitle: (req.body.displayTitle || "").trim() || title,
+      sourceUrl: url,
+      createdAt: new Date().toISOString(),
+    };
+    await withLock(() => {
+      const videos = loadVideos();
+      videos.push(entry);
+      saveVideos(videos);
+    });
+    res.status(201).json(entry);
+  } catch (e) {
+    res.status(502).json({ error: `ダウンロードに失敗しました: ${String(e.message || e)}` });
+  }
+}));
+
+// 動画削除 (ファイルごと削除。行事の次第から参照されている場合は警告だけ返して削除は実行する)
+app.delete("/api/videos/:id", asyncRoute(async (req, res) => {
+  const entry = await withLock(() => {
+    const videos = loadVideos();
+    const idx = videos.findIndex((v) => v.id === req.params.id);
+    if (idx === -1) return null;
+    const [removed] = videos.splice(idx, 1);
+    saveVideos(videos);
+    return removed;
+  });
+  if (!entry) {
+    res.status(404).json({ error: "not found" });
+    return;
+  }
+  fs.unlink(path.join(TRACKS_DIR, entry.filename), () => {});
+
+  const program = loadProgram();
+  const stillUsed = program.some((item) => item.performingVideoId === entry.id);
+  res.json({ deleted: entry.id, warning: stillUsed ? "行事の次第から参照されたままです" : null });
 }));
 
 // ボーカル除去 (Demucs) を実行し、インストゥルメンタル版を新しい曲として登録する

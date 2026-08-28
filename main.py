@@ -828,6 +828,37 @@ def load_playlists(track_dir: str) -> dict:
     return {pid: {"trackIds": resolve(pid), "loop": p.get("loop", True)} for pid, p in raw.items()}
 
 
+def load_videos(track_dir: str) -> dict:
+    """tracks/videos.json (bgm-library で作成する動画ライブラリ) を
+    id -> {"filename", "title", "displayTitle"} の辞書として読み込む。
+    ファイルが無ければ空辞書を返す(動画機能を使っていない場合はこれで良い)。
+    """
+    path = os.path.join(track_dir, "videos.json")
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            entries = json.load(f)
+    except Exception as e:
+        print(f"[警告] videos.jsonの読み込みに失敗しました: {e}")
+        return {}
+
+    if not isinstance(entries, list):
+        print("[警告] videos.json は動画の配列である必要があります")
+        return {}
+    result = {}
+    for v in entries:
+        if not isinstance(v, dict) or not isinstance(v.get("id"), str):
+            print(f"[警告] videos.json に id を持たない要素があるため読み飛ばします: {v!r:.60}")
+            continue
+        result[v["id"]] = {
+            "filename": v.get("filename", ""),
+            "title": v.get("title", ""),
+            "displayTitle": v.get("displayTitle") or v.get("title", ""),
+        }
+    return result
+
+
 # program.json 形式:
 #   [
 #     {"name": "開会の言葉", "playlistId": null},
@@ -879,6 +910,8 @@ class ProgramController:
         self.player = player
         self.playlists = load_playlists(player.track_dir)
         self._playlists_mtime = self._playlists_json_mtime()
+        self.videos = load_videos(player.track_dir)
+        self._videos_mtime = self._videos_json_mtime()
 
         self.started = False  # 最初の進行(N)がまだ押されていない状態
         self.current_idx = 0
@@ -920,6 +953,26 @@ class ProgramController:
             return [track_id]
         return []
 
+    def _performing_video(self, item: dict):
+        """上演中に流す動画の外部公開用情報。演目に performingVideoId が
+        割り当てられ、videos.json 上に実際に存在する場合のみ辞書を返す
+        (それ以外はNone)。videoSide/videoMuted/videoSyncPlaybackは
+        bgm-libraryの次第編集画面で演目ごとに設定する。
+        """
+        video_id = item.get("performingVideoId")
+        if not video_id:
+            return None
+        video = self.videos.get(video_id)
+        if not video:
+            return None
+        return {
+            "title": video["displayTitle"],
+            "url": f"/media/{video['filename']}",
+            "side": "right" if item.get("videoSide") == "right" else "left",
+            "muted": bool(item.get("videoMuted")),
+            "syncPlayback": item.get("videoSyncPlayback") is not False,
+        }
+
     def _playlists_json_mtime(self):
         path = os.path.join(self.player.track_dir, "playlists.json")
         try:
@@ -939,6 +992,24 @@ class ProgramController:
             return
         self._playlists_mtime = mtime
         self.playlists = load_playlists(self.player.track_dir)
+
+    def _videos_json_mtime(self):
+        path = os.path.join(self.player.track_dir, "videos.json")
+        try:
+            return os.path.getmtime(path)
+        except OSError:
+            return None
+
+    def reload_videos_if_changed(self):
+        """bgm-libraryで動画を追加/削除した内容を、main.py再起動無しで反映する。
+        再生中の動画自体は差し替えない(次に演目が切り替わったときから新しい
+        内容が使われる)。reload_playlists_if_changed()と同じ仕組み。
+        """
+        mtime = self._videos_json_mtime()
+        if mtime is None or mtime == self._videos_mtime:
+            return
+        self._videos_mtime = mtime
+        self.videos = load_videos(self.player.track_dir)
 
     def _resolve_loop(self, item: dict, playlist_field: str, track_field: str) -> bool:
         """このBGMが最後まで流れたら先頭に戻ってループするかを、割り当て方に
@@ -1229,6 +1300,12 @@ class ProgramController:
         }
         if self.bgm_queue:
             info["bgm"] = self.player.current_public()
+        video = self._performing_video(self.items[self.current_idx])
+        if video:
+            info["video"] = video
+            # 動画側で「videoSyncPlayback」時に▶/⏸へ追従させるために必要
+            # (bgmが無い演目でも動画だけは再生/一時停止を連動させたい場合がある)。
+            info["playing"] = self.player.playing
         return info
 
     def _resolve_tracks(self, track_ids):
@@ -1504,6 +1581,8 @@ def make_now_playing_server(
                 })
             elif self.path == "/calib":
                 self._send_json(calib_store.get())
+            elif self.path.startswith("/media/"):
+                self._serve_media()
             else:
                 self._serve_static()
 
@@ -1547,6 +1626,78 @@ def make_now_playing_server(
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+        # 上演中に流す動画の配信用 (/media/<filename>)。bgm-libraryの動画ライブラリで
+        # 登録した動画ファイルは音源と同じ track_dir に保存されている。
+        # HTML5の<video>はシーク/バッファリングにHTTP Rangeリクエストを使うため、
+        # Rangeヘッダに対応していないとブラウザによっては再生自体ができない。
+        MEDIA_FILENAME_RE = re.compile(r"^[A-Za-z0-9_-]+\.[A-Za-z0-9]+$")
+        MEDIA_CONTENT_TYPES = {
+            ".mp4": "video/mp4",
+            ".webm": "video/webm",
+            ".mov": "video/quicktime",
+            ".mkv": "video/x-matroska",
+        }
+        MEDIA_RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
+        MEDIA_CHUNK_SIZE = 256 * 1024
+
+        def _serve_media(self):
+            filename = os.path.basename(self.path.split("?", 1)[0])
+            ext = os.path.splitext(filename)[1].lower()
+            if not self.MEDIA_FILENAME_RE.match(filename) or ext not in self.MEDIA_CONTENT_TYPES:
+                self.send_response(404)
+                self.end_headers()
+                return
+            file_path = os.path.join(player.track_dir, filename)
+            if not os.path.isfile(file_path):
+                self.send_response(404)
+                self.end_headers()
+                return
+
+            content_type = self.MEDIA_CONTENT_TYPES[ext]
+            file_size = os.path.getsize(file_path)
+            start, end = 0, file_size - 1
+            is_partial = False
+
+            range_header = self.headers.get("Range")
+            if range_header:
+                m = self.MEDIA_RANGE_RE.match(range_header)
+                if not m:
+                    self.send_response(416)
+                    self.send_header("Content-Range", f"bytes */{file_size}")
+                    self.end_headers()
+                    return
+                start_s, end_s = m.groups()
+                start = int(start_s) if start_s else 0
+                end = min(int(end_s), file_size - 1) if end_s else file_size - 1
+                if start > end or start >= file_size:
+                    self.send_response(416)
+                    self.send_header("Content-Range", f"bytes */{file_size}")
+                    self.end_headers()
+                    return
+                is_partial = True
+
+            length = end - start + 1
+            self.send_response(206 if is_partial else 200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Length", str(length))
+            if is_partial:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
+            self.end_headers()
+
+            try:
+                with open(file_path, "rb") as f:
+                    f.seek(start)
+                    remaining = length
+                    while remaining > 0:
+                        chunk = f.read(min(self.MEDIA_CHUNK_SIZE, remaining))
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        remaining -= len(chunk)
+            except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+                pass  # ブラウザがシーク等で途中の接続を切っただけ。エラー扱いにしない
 
         # 操作ロック中は拒否するエンドポイント (/lock/toggle自体はここに含めない。
         # 含めるとロック中に解除できなくなってしまうため)。
@@ -1975,6 +2126,7 @@ def main():
                         player.reload_library_if_changed()
                         if program:
                             program.reload_playlists_if_changed()
+                            program.reload_videos_if_changed()
                             program.tick()
                             player.allowed_ids = list(program.active_playlist_ids())
                         player.tick()
@@ -2031,6 +2183,7 @@ def main():
                         player.reload_library_if_changed()
                         if program:
                             program.reload_playlists_if_changed()
+                            program.reload_videos_if_changed()
                             program.tick()
                             player.allowed_ids = list(program.active_playlist_ids())
                         player.tick()

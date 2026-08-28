@@ -47,6 +47,19 @@ html, body {
 }
 #track-sub:empty { display: none; }
 
+/* 上演中に演目へ動画が割り当てられ、かつこのモニターがその表示側のとき、
+   #stage(演目名/BGM情報)の代わりに画面いっぱいに表示する。 */
+#video-el {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  object-fit: contain;
+  background: #000;
+  display: none;
+}
+
 #conn-error {
   position: fixed;
   bottom: 2vh;
