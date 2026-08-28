@@ -319,6 +319,15 @@ previewVideoEl.style.cssText = "display:block;max-width:100%;margin-top:8px;bord
 previewVideoEl.controls = true;
 let previewVideoId = null;
 
+// renderVideoLibrary()を呼ぶと一覧全体のinnerHTMLが作り直され、直前に
+// appendChildした<video>ごと消えてしまう(再生した瞬間にプレビューが
+// 消えたように見えるバグの原因だった)。そのためここではボタンの表示だけを
+// 直接書き換え、一覧全体の再描画はしない。
+function setPreviewButtonLabel(id, playing) {
+  const btn = document.querySelector(`[data-video-preview="${id}"]`);
+  if (btn) btn.textContent = playing ? "■ 閉じる" : "▶ 試し見";
+}
+
 function toggleVideoPreview(id, container) {
   const video = videos.find(v => v.id === id);
   if (!video) return;
@@ -331,12 +340,13 @@ function toggleVideoPreview(id, container) {
   container.appendChild(previewVideoEl);
   previewVideoEl.play().catch(() => {});
   previewVideoId = id;
-  renderVideoLibrary();
+  setPreviewButtonLabel(id, true);
 }
 
 function stopVideoPreview() {
   previewVideoEl.pause();
   if (previewVideoEl.parentNode) previewVideoEl.parentNode.removeChild(previewVideoEl);
+  if (previewVideoId) setPreviewButtonLabel(previewVideoId, false);
   previewVideoId = null;
 }
 
