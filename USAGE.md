@@ -390,7 +390,7 @@ last.fm APIキーは https://www.lastfm.jp/api/account/create で無料取得で
 
 | メソッド | パス | 内容 |
 |---|---|---|
-| `GET` | `/now-playing` | 配信画面向け。`--program` 未使用時は `{track: {title, author, arranged, note?, durationSec?}, playing, volume, index, total_tracks, repeat, restricted, elapsed, tracks}`。`elapsed`は現在の曲の再生経過秒数、`durationSec`は`bgm-library`が取得済みの場合のみ含まれる。使用時は開始前なら `{mode: "ready", starts_with: "transition"\|"performing", next_item}`、上演中なら `{mode: "performing", current_item, bgm?: {title, author, arranged, note?}}`(上演中プレイリストがある演目のみ `bgm` を含む)、転換中なら `{mode: "transition", next_item, bgm: {title, author, arranged, note?}}` |
+| `GET` | `/now-playing` | 配信画面向け。`--program` 未使用時は `{track: {title, author, arranged, note?, durationSec?}, playing, volume, index, total_tracks, repeat, restricted, locked, elapsed, tracks}`。`elapsed`は現在の曲の再生経過秒数、`durationSec`は`bgm-library`が取得済みの場合のみ含まれる。使用時は開始前なら `{mode: "ready", starts_with: "transition"\|"performing", next_item}`、上演中なら `{mode: "performing", current_item, bgm?: {title, author, arranged, note?}}`(上演中プレイリストがある演目のみ `bgm` を含む)、転換中なら `{mode: "transition", next_item, bgm: {title, author, arranged, note?}}` |
 | `GET` | `/admin/status` | 管理画面向け。`{player: <player.status()と同じ>, program: <programがあればadmin_status()、なければnull>}`。`program.admin_status()` は `status()` に `started`, `can_go_back`, `current_idx`, `total_items`, `items`(演目名一覧)を追加したもの。さらに転換中は `current_playlist`(`{id,title,author}` の配列)と `current_playlist_index`、それ以外は `upcoming_playlist`(次に進めると流れる予定のプレイリスト)を含む |
 | `POST` | `/command` | 再生操作。Body: `{"command": "PLAY_PAUSE"\|"STOP"\|"NEXT"\|"PREV"\|"VOL_UP"\|"VOL_DOWN"\|"REPEAT_TOGGLE"\|"RESTRICT_TOGGLE"}`。202で受理、内部のコマンドキューに積まれメインループで実行される |
 | `POST` | `/program/advance` | 次第を次の演目へ進める(`--program` 未指定時は400) |
@@ -400,6 +400,7 @@ last.fm APIキーは https://www.lastfm.jp/api/account/create で無料取得で
 | `POST` | `/seek` | 現在の曲の再生位置を指定秒数に移動する。Body: `{"seconds": 45}`。`control.html`のNOW PLAYINGの再生時間バーをクリックすると呼ばれる |
 | `GET` | `/calib` | モニター1・2のキャリブレーション状態 `{"1": {heightCm, yOffsetPx}, "2": {...}}` |
 | `POST` | `/calib` | キャリブレーション更新。Body例: `{"monitor": "1", "heightCm": 30}` または `{"monitor": "1", "yOffsetPx": 10}` |
+| `POST` | `/lock/toggle` | 操作ロックのON/OFFを切り替える。Body不要。`{"locked": true\|false}` を返す。ロック中は下記の操作系エンドポイント(`/command` `/seek` `/program/advance` `/program/back` `/program/reset` `/program/play-track`)がすべて `423` で拒否される(このエンドポイント自体はロック中でも常に呼べる。でないと解除できなくなるため)。`GET`系(`/now-playing` `/admin/status` `/calib`)や `/calib` の更新はロックの影響を受けない |
 
 ## bgm-library API リファレンス
 
@@ -446,6 +447,24 @@ last.fm APIキーは https://www.lastfm.jp/api/account/create で無料取得で
 - `program.json`(行事の次第そのもの、演目の追加・削除・BGM割り当て)は
   現状この自動反映の対象外。次第の構成を変えた場合は `main.py` の再起動が
   必要(進行中の演目インデックスが食い違う事故を避けるため)。
+
+## 操作ロック
+
+`control.html` 上部に常時表示される「🔒 ロックする」ボタン(ページをスクロール
+しても追従して常に見える位置に固定表示)で、誤操作防止のためのロックをON/OFF
+できる。ロック中は以下がすべて無効になる。
+
+- 再生/一時停止・停止・前/次の曲・音量・リピート・プレイリスト制限のボタン
+- 次第カードの「戻る」「次の演目へ」「最初からにリセット」、プレイリストの
+  クリック再生、N/Bキーショートカット
+- 再生時間バーのクリックによるシーク
+
+ロックはサーバー側(`main.py`)の状態(`BGMPlayer.locked`)として保持され、
+`POST /lock/toggle` で切り替える。ロック中はこの機能に対応する操作系
+エンドポイントがすべて `423` で拒否されるため、`control.html` を経由しない
+直接のAPI呼び出しでも誤操作できない。ハンドサイン/音声コマンドや
+`--hand-sign` のカメラ操作、bgm-libraryでの編集はロックの対象外(従来通り操作できる)。
+配信画面の位置調整(`/calib`)もロックの対象外。
 
 ## 曲の切り替え時のフェード
 

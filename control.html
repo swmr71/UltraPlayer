@@ -6,10 +6,15 @@
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body {
-    width: 100%; height: 100%;
+    width: 100%; min-height: 100%;
     background: #101018;
     color: #eee;
     font-family: "Segoe UI", "Yu Gothic UI", sans-serif;
+  }
+  #top-bar {
+    position: sticky;
+    top: 0;
+    z-index: 20;
   }
   #warn {
     background: #7a1f1f;
@@ -18,6 +23,27 @@
     padding: 8px;
     font-weight: 700;
     letter-spacing: 0.05em;
+  }
+  #lock-bar {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    background: #23232e;
+    padding: 8px 16px;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+  }
+  #lock-status { font-size: 13px; letter-spacing: 0.05em; color: #9fd6a8; }
+  #lock-bar.locked #lock-status { color: #ff9d6b; font-weight: 700; }
+  #btn-lock-toggle { margin: 0; }
+  #lock-bar.locked #btn-lock-toggle { background: #b3453f; }
+  /* ロック中は操作系(コントロール・次第カード・シークバー)をクリック不可＆半透明にする。
+     位置調整パネルとNOW PLAYINGの表示自体は見えたままにしておく(状態確認は必要なため)。 */
+  body.locked #controls,
+  body.locked #program-card,
+  body.locked #time-track {
+    pointer-events: none;
+    opacity: 0.4;
   }
   #app {
     display: flex;
@@ -261,7 +287,13 @@
 </style>
 </head>
 <body>
-<div id="warn">⚠ この画面は操作者用です。OBSのシーンには追加しないでください(monitor1.html / monitor2.html を配信用に使ってください)</div>
+<div id="top-bar">
+  <div id="warn">⚠ この画面は操作者用です。OBSのシーンには追加しないでください(monitor1.html / monitor2.html を配信用に使ってください)</div>
+  <div id="lock-bar">
+    <span id="lock-status">🔓 操作ロック: OFF</span>
+    <button id="btn-lock-toggle">🔒 ロックする</button>
+  </div>
+</div>
 <div id="app">
   <div class="col">
     <h2>NOW PLAYING</h2>
@@ -300,7 +332,7 @@
       <button id="btn-voldown">🔉 音量-</button>
       <button id="btn-volup">🔊 音量+</button>
       <button id="btn-repeat" class="wide">🔁 リピート: OFF</button>
-      <button id="btn-restrict" class="wide">🔒 プレイリスト内のみ再生</button>
+      <button id="btn-restrict" class="wide">🎯 プレイリスト内のみ再生</button>
     </div>
 
     <div id="program-card" style="display:none;">
@@ -380,6 +412,7 @@ const PROGRAM_RESET_URL = "/program/reset";
 const PROGRAM_PLAY_TRACK_URL = "/program/play-track";
 const SEEK_URL = "/seek";
 const CALIB_URL = "/calib";
+const LOCK_TOGGLE_URL = "/lock/toggle";
 const POLL_MS = 700;
 
 const statusBadge = document.getElementById("status-badge");
@@ -581,6 +614,7 @@ async function poll() {
     renderPlaylist(player);
     renderProgram(data.program, player.playing);
     renderToggles(player);
+    renderLock(player);
   } catch (e) {
     connDot.classList.remove("ok");
     connText.textContent = "未接続 (main.py が起動しているか確認してください)";
@@ -589,17 +623,37 @@ async function poll() {
 
 const repeatBtn = document.getElementById("btn-repeat");
 const restrictBtn = document.getElementById("btn-restrict");
+const lockBar = document.getElementById("lock-bar");
+const lockStatus = document.getElementById("lock-status");
+const lockToggleBtn = document.getElementById("btn-lock-toggle");
+
+function renderLock(player) {
+  const locked = Boolean(player.locked);
+  document.body.classList.toggle("locked", locked);
+  lockBar.classList.toggle("locked", locked);
+  lockStatus.textContent = locked ? "🔒 操作ロック: ON (誤操作防止中)" : "🔓 操作ロック: OFF";
+  lockToggleBtn.textContent = locked ? "🔓 解除する" : "🔒 ロックする";
+}
+
+lockToggleBtn.addEventListener("click", async () => {
+  try {
+    await fetch(LOCK_TOGGLE_URL, { method: "POST" });
+    poll();
+  } catch (e) {
+    // 未接続時は poll() 側のエラー表示に任せる
+  }
+});
 
 function renderToggles(player) {
   repeatBtn.textContent = `🔁 リピート: ${player.repeat ? "ON" : "OFF"}`;
   repeatBtn.classList.toggle("toggle-on", Boolean(player.repeat));
 
   if (player.restricted) {
-    restrictBtn.textContent = "🔒 プレイリスト内のみ再生";
+    restrictBtn.textContent = "🎯 プレイリスト内のみ再生";
     restrictBtn.classList.add("toggle-on");
     restrictBtn.classList.remove("toggle-warn");
   } else {
-    restrictBtn.textContent = "🔓 制限解除中 (全曲再生可)";
+    restrictBtn.textContent = "🌐 制限解除中 (全曲再生可)";
     restrictBtn.classList.add("toggle-warn");
     restrictBtn.classList.remove("toggle-on");
   }
@@ -660,6 +714,7 @@ programResetBtn.addEventListener("click", async () => {
 // control.html を操作の中心にしてる場合はキーが「効かない」状態になっていた。
 document.addEventListener("keydown", (e) => {
   if (e.ctrlKey || e.altKey || e.metaKey) return;
+  if (document.body.classList.contains("locked")) return;  // 操作ロック中はN/Bも効かない
   const tag = (e.target && e.target.tagName) || "";
   if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
   if (programCard.style.display === "none") return;

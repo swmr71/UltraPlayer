@@ -380,6 +380,7 @@ class BGMPlayer:
         self.paused = False
         self.repeat = False  # 通常再生時、曲が終わったら繰り返すかどうか
         self.restricted = True  # ⏭/⏮ を allowed_ids 内の曲だけに制限するかどうか
+        self.locked = False  # ONの間、control.htmlからの操作系リクエストをすべて拒否する
         self.allowed_ids = None  # 制限対象の曲idのリスト (Noneなら制限データ無し=無制限、順序はプレイリストの再生順)
         # 再生経過秒数の自前管理。pygame.mixer.music.get_pos()はseek(set_pos)後も
         # 実際の再生位置に追従せず、最初にplay()した時刻からの経過時間を返し続ける
@@ -570,6 +571,7 @@ class BGMPlayer:
             "total_tracks": len(self.library),
             "repeat": self.repeat,
             "restricted": self.restricted,
+            "locked": self.locked,
             "elapsed": round(self.elapsed_sec(), 1),
             "tracks": [
                 {"id": t["id"], "title": t["displayTitle"], "author": t["author"], "arranged": t["arranged"]}
@@ -1546,13 +1548,27 @@ def make_now_playing_server(
             self.end_headers()
             self.wfile.write(body)
 
+        # 操作ロック中は拒否するエンドポイント (/lock/toggle自体はここに含めない。
+        # 含めるとロック中に解除できなくなってしまうため)。
+        LOCKABLE_PATHS = {
+            "/command", "/seek",
+            "/program/advance", "/program/back", "/program/reset", "/program/play-track",
+        }
+
         def _do_POST(self):
             # 更新系はまずCSRF(他サイトからの勝手なPOST)を弾く。
             if not self._origin_ok():
                 self._send_json({"error": "cross-origin request rejected"}, status=403)
                 return
 
-            if self.path == "/calib":
+            if self.path in self.LOCKABLE_PATHS and player.locked:
+                self._send_json({"error": "操作ロック中です"}, status=423)
+                return
+
+            if self.path == "/lock/toggle":
+                player.locked = not player.locked
+                self._send_json({"locked": player.locked})
+            elif self.path == "/calib":
                 payload = self._read_json_body()
                 if payload is None:
                     return
