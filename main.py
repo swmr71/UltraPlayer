@@ -1943,6 +1943,14 @@ def stop_bgm_library(proc):
 def apply_command(player: "BGMPlayer", command: str, prefix: str = "", program: "ProgramController" = None) -> str:
     """ジェスチャー・音声どちらから来たコマンドも同じ処理にまとめる"""
     if command == "PLAY_PAUSE":
+        # 次第使用中、今の演目にBGMが割り当てられていない(bgm_queueが空。
+        # 例: 動画だけを割り当てた演目)ときは▶を押しても何もしない。
+        # pygame.mixer.musicは stop() 後も直前にロードした曲を保持し続けるため、
+        # ここでガードせずに toggle_play_pause() を呼ぶと、BGM無しの演目なのに
+        # 前の演目の曲が「勝手に」再生されてしまう(見た目には無関係な曲や
+        # プレイリストが紛れ込んだように見える)。
+        if program is not None and not program.bgm_queue:
+            return f"[{prefix}] PLAY_PAUSE (この演目にはBGMが割り当てられていません)"
         player.toggle_play_pause()
         state = "PLAY" if player.playing else "PAUSE"
         return f"[{prefix}] {state}"
