@@ -64,7 +64,7 @@ async function pollCalib() {
     const data = await res.json();
     if (data["1"]) { state[1].heightCm = data["1"].heightCm; state[1].yOffsetPx = data["1"].yOffsetPx || 0; }
     if (data["2"]) { state[2].heightCm = data["2"].heightCm; state[2].yOffsetPx = data["2"].yOffsetPx || 0; }
-    render(lastData);
+    safe("キャリブレーション反映", () => render(lastData));
   } catch (e) {
     // キャリブレーションサーバーに繋がらない場合はデフォルト値のまま表示を続ける
   }
@@ -188,6 +188,9 @@ function render(data) {
   }
   const info = extractNowPlaying(data);
   trackName.textContent = info.title ?? "";
+  // 無音転換で水色にした文字色をここで必ず戻す
+  // (戻さないと以降の演目名・曲名がずっと水色のままになる)
+  trackName.style.color = "";
   trackSub.textContent = info.sub || "";
   statusBadge.textContent = info.statusText;
   statusBadge.style.visibility = "visible";
@@ -195,23 +198,40 @@ function render(data) {
   layoutStage();
 }
 
-// --- 再生中の曲情報ポーリング ---
-async function pollNowPlaying() {
+// 表示の組み立てで例外が出ても、ポーリングだけは死なせないためのラッパー。
+// (読み込み時に throw すると setInterval の登録前にscriptが止まり、
+//  画面が本番中ずっと固まったままになる)
+function safe(label, fn) {
   try {
-    const res = await fetch(NOW_PLAYING_URL, { cache: "no-store" });
-    if (!res.ok) throw new Error("bad status");
-    const data = await res.json();
-    connError.classList.remove("show");
-    lastData = data;
-    render(data);
+    fn();
   } catch (e) {
-    connError.classList.add("show");
+    console.error(`[display] ${label} に失敗しました`, e);
   }
 }
 
-window.addEventListener("resize", () => { if (lastData) render(lastData); else layoutStage(); });
+// --- 再生中の曲情報ポーリング ---
+async function pollNowPlaying() {
+  let data;
+  try {
+    const res = await fetch(NOW_PLAYING_URL, { cache: "no-store" });
+    if (!res.ok) throw new Error("bad status");
+    data = await res.json();
+  } catch (e) {
+    connError.classList.add("show");
+    return;
+  }
+  connError.classList.remove("show");
+  lastData = data;
+  // 描画の失敗を通信エラー表示にはしない。ここを一緒くたにすると、
+  // 表示のバグが「main.pyが落ちている」ように見えて切り分けができない。
+  safe("描画", () => render(data));
+}
 
-layoutStage();
+window.addEventListener("resize", () => {
+  safe("リサイズ時の再描画", () => { if (lastData) render(lastData); else layoutStage(); });
+});
+
+safe("初期レイアウト", layoutStage);
 pollNowPlaying();
 pollCalib();
 setInterval(pollNowPlaying, POLL_MS);

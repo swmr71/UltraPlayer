@@ -137,13 +137,32 @@ function extractNowPlaying(data) {
   };
 }
 
+// 表示の組み立てで例外が出ても、ポーリングだけは死なせないためのラッパー。
+// (読み込み時に throw すると setInterval の登録前にscriptが止まり、
+//  画面が本番中ずっと固まったままになる)
+function safe(label, fn) {
+  try {
+    fn();
+  } catch (e) {
+    console.error(`[display] ${label} に失敗しました`, e);
+  }
+}
+
 async function poll() {
+  let data;
   try {
     const res = await fetch(API_URL, { cache: "no-store" });
     if (!res.ok) throw new Error("bad status");
-    const data = await res.json();
-    connError.classList.remove("show");
+    data = await res.json();
+  } catch (e) {
+    connError.classList.add("show");
+    return;
+  }
+  connError.classList.remove("show");
 
+  // 描画の失敗を通信エラー表示にはしない。ここを一緒くたにすると、
+  // 表示のバグが「main.pyが落ちている」ように見えて切り分けができない。
+  safe("描画", () => {
     const info = extractNowPlaying(data);
     trackName.textContent = info.title ?? "";
     trackName.style.color = info.titleColor || "";
@@ -153,9 +172,7 @@ async function poll() {
     appEl.classList.toggle("paused", !info.playing);
 
     fitTrackName();
-  } catch (e) {
-    connError.classList.add("show");
-  }
+  });
 }
 
 poll();

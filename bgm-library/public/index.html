@@ -212,20 +212,61 @@ function togglePreview(id) {
   });
 }
 
+// エラー時にサーバーが {"error": "..."} を返すため、配列を期待している箇所で
+// そのまま .map()/.forEach() すると例外になり、画面の描画が丸ごと止まる。
+async function fetchArray(url) {
+  const res = await fetch(url);
+  const data = await res.json();
+  if (!Array.isArray(data)) {
+    throw new Error(data && data.error ? data.error : `${url} が配列を返しませんでした`);
+  }
+  return data;
+}
+
+// 初期化・再読み込みの失敗を画面上部に出す。コンソールを開いていないと
+// 「なぜか一覧が出ない」で終わってしまうため。
+function showLoadError(message) {
+  let el = document.getElementById("load-error");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "load-error";
+    el.style.cssText =
+      "position:sticky;top:0;z-index:9999;background:#5a1d1d;color:#ffd7d7;" +
+      "padding:8px 14px;font-size:13px;border-bottom:1px solid #8a2b2b;";
+    document.body.prepend(el);
+  }
+  el.textContent = message;
+}
+
+function clearLoadError() {
+  const el = document.getElementById("load-error");
+  if (el) el.remove();
+}
+
 async function refreshLibrary() {
-  library = await fetch("/api/tracks").then(r => r.json());
+  library = await fetchArray("/api/tracks");
   renderLibrary();
   renderPlaylistManager();
   renderProgram();
 }
 
 async function refreshProgram() {
-  program = await fetch("/api/program").then(r => r.json());
+  const raw = await fetchArray("/api/program");
+  // 演目は必ずオブジェクト。手で編集した program.json に文字列やnullが
+  // 混ざっていると renderProgram() が落ちて画面が出なくなるため、ここで弾く。
+  // ただし黙って捨てると保存時にデータを失うので警告を出す。
+  program = raw.filter(item => item && typeof item === "object" && !Array.isArray(item));
+  if (program.length !== raw.length) {
+    showLoadError(
+      `program.json に演目として扱えないデータが ${raw.length - program.length} 件あります。` +
+      "この状態で保存すると失われます。ファイルを直接確認してください。"
+    );
+  }
   renderProgram();
 }
 
 async function refreshPlaylists() {
-  playlists = await fetch("/api/playlists").then(r => r.json());
+  playlists = await fetchArray("/api/playlists");
   renderPlaylistManager();
   renderProgram();
 }
@@ -1006,6 +1047,7 @@ async function resumeActiveVocalJobs() {
   } catch (e) {
     return;
   }
+  if (!Array.isArray(runningJobs)) return;  // 500のエラーJSON等
   for (const j of runningJobs) {
     if (j.trackId) activeVocalJobs[j.trackId] = { jobId: j.jobId, progress: j.progress ?? 0 };
   }
@@ -1014,11 +1056,27 @@ async function resumeActiveVocalJobs() {
   }
 }
 
+// await の直列なので、1つでも例外が出ると以降が全て走らず画面が空のままになる。
+// ステップごとに独立させ、失敗しても残りは描画し、原因を画面に出す。
+async function initStep(label, fn) {
+  try {
+    await fn();
+    return true;
+  } catch (e) {
+    console.error(`[bgm-library] ${label} に失敗しました`, e);
+    showLoadError(`${label} に失敗しました: ${(e && e.message) || e}`);
+    return false;
+  }
+}
+
 (async () => {
-  await resumeActiveVocalJobs();
-  await refreshLibrary();
-  await refreshPlaylists();
-  await refreshProgram();
+  clearLoadError();
+  // 各ステップは独立。ここで最後にまとめてバナーを消してはいけない
+  // (refreshProgram が出す「不正な演目がある」警告まで消えてしまう)。
+  await initStep("実行中ジョブの復元", resumeActiveVocalJobs);
+  await initStep("曲一覧の読み込み", refreshLibrary);
+  await initStep("プレイリストの読み込み", refreshPlaylists);
+  await initStep("行事の次第の読み込み", refreshProgram);
 })();
 </script>
 </body>

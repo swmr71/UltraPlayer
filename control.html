@@ -663,6 +663,7 @@ document.addEventListener("keydown", (e) => {
   const tag = (e.target && e.target.tagName) || "";
   if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
   if (programCard.style.display === "none") return;
+  if (typeof e.key !== "string") return;  // IME確定中など key が無いイベント
   const key = e.key.toLowerCase();
   if (key === "n") {
     e.preventDefault();

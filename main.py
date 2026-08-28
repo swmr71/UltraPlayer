@@ -293,6 +293,14 @@ class VoiceController:
         return None
 
     def _listen_loop(self):
+        try:
+            self._listen_loop_inner()
+        except Exception as e:
+            # スレッド内の例外はプロセスを落とさないが、黙って死ぬと
+            # 「音声コマンドだけ効かない」状態の原因が分からなくなる。
+            print(f"[警告] 音声認識を停止しました (マイクが外れた等): {e}")
+
+    def _listen_loop_inner(self):
         pa = self._pyaudio.PyAudio()
         stream = pa.open(
             format=self._pyaudio.paInt16,
@@ -378,7 +386,7 @@ class BGMPlayer:
         # だけなので、シーク機能のためにここで基準値+開始時刻から計算する。
         self._elapsed_base = 0.0        # 一時停止中/直近シーク時点での経過秒数
         self._elapsed_started_at = None  # 上記基準からの計測開始wall clock時刻 (Noneなら停止/一時停止中)
-        pygame.mixer.music.set_volume(self.volume)
+        self._apply_volume()
         if self.library:
             self._load_current()
 
@@ -480,6 +488,21 @@ class BGMPlayer:
             print(f"[警告] 曲を読み込めませんでした (ファイルが壊れている可能性があります): {path} ({e})")
             return False
 
+    def _play_loaded(self, fade_ms: int = 0) -> bool:
+        """ロード済みの曲の再生を開始する。_load_current() と同じく、
+        失敗しても例外を外に出さずFalseを返す。
+
+        play() は load() が成功していても、デバイスが途中で失われた等で
+        pygame.error を投げうる。ここを素通しにすると、ハンドサイン経由の
+        ⏭/⏮ でプロセスごと落ちる経路になっていた。
+        """
+        try:
+            pygame.mixer.music.play(fade_ms=fade_ms)
+            return True
+        except Exception as e:
+            print(f"[警告] 再生を開始できませんでした: {e}")
+            return False
+
     def current_track(self):
         # HTTPスレッド(/now-playing, /admin/status)からも呼ばれる。
         # reload_library_if_changed() によるライブラリ差し替えと競合しても
@@ -558,7 +581,12 @@ class BGMPlayer:
         if not self.library:
             return
         if self.playing:
-            pygame.mixer.music.pause()
+            try:
+                pygame.mixer.music.pause()
+            except Exception as e:
+                print(f"[警告] 一時停止に失敗しました: {e}")
+            # pause()が失敗しても状態は「停止した」に倒す。実際に鳴り続けていても
+            # 次の▶で unpause -> play にフォールバックできる。
             self.playing = False
             self.paused = True
             self._elapsed_base = self.elapsed_sec()
@@ -580,7 +608,10 @@ class BGMPlayer:
                 self._elapsed_started_at = None
 
     def stop(self):
-        pygame.mixer.music.stop()
+        try:
+            pygame.mixer.music.stop()
+        except Exception as e:
+            print(f"[警告] 停止に失敗しました: {e}")
         self.playing = False
         self.paused = True
         self._elapsed_base = 0.0
@@ -638,7 +669,12 @@ class BGMPlayer:
             return
         if not (self.playing or self.paused):
             return  # 何も鳴っていない(初回再生など)ならフェードアウトの必要は無い
-        pygame.mixer.music.fadeout(fade_ms)
+        try:
+            pygame.mixer.music.fadeout(fade_ms)
+        except Exception as e:
+            # フェードできなくても曲の切り替え自体は続行する (無音のまま切り替わるだけ)
+            print(f"[警告] フェードアウトに失敗しました: {e}")
+            return
         time.sleep(fade_ms / 1000)
 
     def _navigate(self, direction: int, fade_ms: int = DEFAULT_FADE_MS):
@@ -656,8 +692,7 @@ class BGMPlayer:
         # 候補の数だけ試して次へスキップする(全滅なら諦めて無音のまま止める)。
         for _ in range(len(candidates)):
             self.index = candidates[pos]
-            if self._load_current():
-                pygame.mixer.music.play(fade_ms=fade_ms)
+            if self._load_current() and self._play_loaded(fade_ms):
                 self.playing = True
                 self.paused = False
                 self._elapsed_base = 0.0
@@ -673,13 +708,19 @@ class BGMPlayer:
     def prev_track(self, fade_ms: int = DEFAULT_FADE_MS):
         self._navigate(-1, fade_ms)
 
+    def _apply_volume(self):
+        try:
+            pygame.mixer.music.set_volume(self.volume)
+        except Exception as e:
+            print(f"[警告] 音量の変更に失敗しました: {e}")
+
     def volume_up(self):
         self.volume = min(1.0, self.volume + 0.1)
-        pygame.mixer.music.set_volume(self.volume)
+        self._apply_volume()
 
     def volume_down(self):
         self.volume = max(0.0, self.volume - 0.1)
-        pygame.mixer.music.set_volume(self.volume)
+        self._apply_volume()
 
     def play_by_id(self, track_id: str, fade_ms: int = DEFAULT_FADE_MS) -> bool:
         """曲idを指定して再生する (行事プログラムの転換BGM用)。
@@ -692,11 +733,10 @@ class BGMPlayer:
             if t["id"] == track_id:
                 self.index = i
                 self._fadeout_current(fade_ms)
-                if not self._load_current():
+                if not self._load_current() or not self._play_loaded(fade_ms):
                     self.playing = False
                     self._elapsed_started_at = None
                     return False
-                pygame.mixer.music.play(fade_ms=fade_ms)
                 self.playing = True
                 self.paused = False
                 self._elapsed_base = 0.0
@@ -748,7 +788,18 @@ def load_playlists(track_dir: str) -> dict:
         print(f"[警告] playlists.jsonの読み込みに失敗しました: {e}")
         return {}
 
-    raw = {p["id"]: p for p in entries}
+    # 手で編集して形が崩れている場合 (配列でない・要素が辞書でない・idが無い) に
+    # ここで落とさない。この関数はメインループから毎回呼ばれうるので、
+    # 例外を出すと本番中に警告が出続けることになる。
+    if not isinstance(entries, list):
+        print("[警告] playlists.json はプレイリストの配列である必要があります")
+        return {}
+    raw = {}
+    for p in entries:
+        if not isinstance(p, dict) or not isinstance(p.get("id"), str):
+            print(f"[警告] playlists.json に id を持たない要素があるため読み飛ばします: {p!r:.60}")
+            continue
+        raw[p["id"]] = p
 
     def resolve(pid, ancestors=frozenset()):
         if pid in ancestors:
@@ -808,6 +859,18 @@ class ProgramController:
             raise RuntimeError(f"{path} のJSONが壊れています ({e})") from e
         if not self.items:
             raise RuntimeError(f"{path} に演目がありません")
+        # 以降のコードは演目が辞書であることを前提に item.get(...) / item["name"] を
+        # 各所で使う。手で編集した program.json が壊れていると、本番中の advance() や
+        # /admin/status で例外が飛び続けることになるので、起動時にまとめて弾く。
+        # (main() はこの例外を捕まえて「次第なし」で起動を続ける)
+        if not isinstance(self.items, list):
+            raise RuntimeError(f"{path} は演目の配列である必要があります")
+        for i, item in enumerate(self.items):
+            if not isinstance(item, dict):
+                raise RuntimeError(f"{path} の{i + 1}番目の演目がオブジェクトではありません")
+            name = item.get("name")
+            if not isinstance(name, str) or not name.strip():
+                raise RuntimeError(f"{path} の{i + 1}番目の演目に name がありません")
         self.player = player
         self.playlists = load_playlists(player.track_dir)
         self._playlists_mtime = self._playlists_json_mtime()
@@ -1355,7 +1418,29 @@ def make_now_playing_server(
             self.send_header("Access-Control-Allow-Headers", "Content-Type")
             self.end_headers()
 
+        def _guard(self, handler):
+            """ハンドラ内で想定外の例外が出ても、接続をいきなり切らずに500を返す。
+
+            socketserver が拾うのでプロセスは落ちないが、そのままだと接続が
+            リセットされ、control.html には「未接続 (main.py が起動しているか
+            確認してください)」と出てしまい原因の切り分けができない。
+            """
+            try:
+                handler()
+            except Exception as e:
+                print(f"[警告] APIハンドラで想定外のエラー ({self.command} {self.path}): {e}")
+                try:
+                    self._send_json({"error": "internal error"}, status=500)
+                except Exception:
+                    pass  # 既にヘッダを送っている等。ここで諦める
+
         def do_GET(self):
+            self._guard(self._do_GET)
+
+        def do_POST(self):
+            self._guard(self._do_POST)
+
+        def _do_GET(self):
             if self.path == "/now-playing":
                 self._send_json(program.status() if program else player.status())
             elif self.path == "/admin/status":
@@ -1409,7 +1494,7 @@ def make_now_playing_server(
             self.end_headers()
             self.wfile.write(body)
 
-        def do_POST(self):
+        def _do_POST(self):
             # 更新系はまずCSRF(他サイトからの勝手なPOST)を弾く。
             if not self._origin_ok():
                 self._send_json({"error": "cross-origin request rejected"}, status=403)
@@ -1585,7 +1670,9 @@ def start_bgm_library(tracks_dir: str, program_file: str | None):
         proc = subprocess.Popen(
             [node_cmd, "server.js"], cwd=BGM_LIBRARY_DIR, env=env, **popen_kwargs
         )
-        print("[bgm-library] 自動起動しました (http://127.0.0.1:4000)")
+        # ポートは .env / PORT 環境変数で変わるうえ main.py 側からは分からないので、
+        # ここでURLを断定しない (実際のURLは bgm-library 自身が起動時に出力する)。
+        print("[bgm-library] 自動起動しました (URLは上の [bgm-library] のログを参照)")
         return proc
     except Exception as e:
         print(f"[警告] bgm-library を自動起動できませんでした: {e}")
@@ -1763,122 +1850,146 @@ def main():
             else:
                 status_text = apply_command(player, queued_command, prefix="CMD", program=program)
 
-    if args.hand_sign:
-        global cv2, mp, np
-        import cv2
-        import mediapipe as mp
-        import numpy as np
-        _mark("カメラ/mediapipe 読み込み")
+    # ここから先で何が起きても、finally の後片付けは必ず走らせる。
+    try:
+        if args.hand_sign:
+            global cv2, mp, np
+            import cv2
+            import mediapipe as mp
+            import numpy as np
+            _mark("カメラ/mediapipe 読み込み")
 
-        mp_hands = mp.solutions.hands
-        mp_drawing = mp.solutions.drawing_utils
+            mp_hands = mp.solutions.hands
+            mp_drawing = mp.solutions.drawing_utils
 
-        cap = cv2.VideoCapture(args.camera)
-        if not cap.isOpened():
-            print("[エラー] カメラを開けませんでした。--camera の番号を確認してください。")
-            sys.exit(1)
+            cap = cv2.VideoCapture(args.camera)
+            if not cap.isOpened():
+                print("[エラー] カメラを開けませんでした。--camera の番号を確認してください。")
+                sys.exit(1)
 
-        with mp_hands.Hands(
-            model_complexity=0,
-            min_detection_confidence=0.6,
-            min_tracking_confidence=0.6,
-            max_num_hands=1,
-        ) as hands:
-            while True:
-                ok, frame = cap.read()
-                if not ok:
-                    break
+            with mp_hands.Hands(
+                model_complexity=0,
+                min_detection_confidence=0.6,
+                min_tracking_confidence=0.6,
+                max_num_hands=1,
+            ) as hands:
+                while True:
+                    ok, frame = cap.read()
+                    if not ok:
+                        break
 
-                frame = cv2.flip(frame, 1)
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                result = hands.process(rgb)
+                    try:
+                        frame = cv2.flip(frame, 1)
+                        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        result = hands.process(rgb)
+                    except Exception as e:
+                        print(f"[警告] カメラ画像の処理に失敗しました: {e}")
+                        continue
 
-                if result.multi_hand_landmarks and result.multi_handedness:
-                    hand_landmarks = result.multi_hand_landmarks[0]
+                    # ジェスチャー判定〜再生操作。ここで例外が出るとループを抜けて
+                    # プロセスごと落ち、後片付け(bgm-libraryの停止等)も走らないため、
+                    # 1フレーム分をまとめて保護する。
+                    try:
+                        if result.multi_hand_landmarks and result.multi_handedness:
+                            hand_landmarks = result.multi_hand_landmarks[0]
 
-                    mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+                            mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
 
-                    gesture = recognizer.recognize(hand_landmarks.landmark)
-                    stable_gesture = recognizer.stabilize(gesture)
+                            gesture = recognizer.recognize(hand_landmarks.landmark)
+                            stable_gesture = recognizer.stabilize(gesture)
 
-                    if recognizer.fire(stable_gesture):
-                        status_text = apply_command(player, stable_gesture, prefix="HAND", program=program)
-                else:
-                    recognizer.stabilize(None)
-                    recognizer.fire(None)
+                            if recognizer.fire(stable_gesture):
+                                status_text = apply_command(player, stable_gesture, prefix="HAND", program=program)
+                        else:
+                            recognizer.stabilize(None)
+                            recognizer.fire(None)
 
-                try:
-                    drain_command_queue()
-                    player.reload_library_if_changed()
-                    if program:
-                        program.reload_playlists_if_changed()
-                        program.tick()
-                        player.allowed_ids = list(program.active_playlist_ids())
-                    player.tick()
-                except Exception as e:
-                    # 本番中にここで想定外の例外(壊れたファイル等)が飛んでも
-                    # プロセス全体を落とさず、警告だけ出して進行を続ける。
-                    print(f"[エラー] 予期しない問題が発生しましたが、続行します: {e}")
+                        drain_command_queue()
+                        player.reload_library_if_changed()
+                        if program:
+                            program.reload_playlists_if_changed()
+                            program.tick()
+                            player.allowed_ids = list(program.active_playlist_ids())
+                        player.tick()
+                    except Exception as e:
+                        # 本番中にここで想定外の例外(壊れたファイル等)が飛んでも
+                        # プロセス全体を落とさず、警告だけ出して進行を続ける。
+                        print(f"[エラー] 予期しない問題が発生しましたが、続行します: {e}")
 
-                # 画面にステータス表示 (日本語ファイル名も文字化けしないようPILで描画)
-                header_h = 100 if program else 70
-                cv2.rectangle(frame, (0, 0), (frame.shape[1], header_h), (0, 0, 0), -1)
-                # 1行ずつ描画するとフレーム全体の色空間変換が行数分だけ走るので、
-                # 表示する行を組み立ててから draw_texts_ja で1回にまとめて描く。
-                overlay_lines = [
-                    (f"Track: {player.current_name()}", (10, 8), 20, (255, 255, 255)),
-                    (f"Status: {status_text}  Vol: {int(player.volume * 100)}%", (10, 38), 20, (0, 255, 0)),
-                ]
-                if program:
-                    p_status = program.status()
-                    if p_status["mode"] == "ready":
-                        prefix = "転換から開始: " if p_status["starts_with"] == "transition" else "開始: "
-                        program_line = f"(開始前) {prefix}{p_status['next_item']}"
-                    elif p_status["mode"] == "performing":
-                        program_line = f"上演中: {p_status['current_item']}"
-                    else:
-                        program_line = f"転換中 -> {p_status['next_item']}"
-                    overlay_lines.append((f"次第: {program_line}", (10, 68), 20, (0, 255, 255)))
-                draw_texts_ja(frame, overlay_lines)
+                    # 画面にステータス表示 (日本語ファイル名も文字化けしないようPILで描画)
+                    # 表示が作れなくても操作自体は続けられるべきなので、ここも保護する。
+                    try:
+                        header_h = 100 if program else 70
+                        cv2.rectangle(frame, (0, 0), (frame.shape[1], header_h), (0, 0, 0), -1)
+                        # 1行ずつ描画するとフレーム全体の色空間変換が行数分だけ走るので、
+                        # 表示する行を組み立ててから draw_texts_ja で1回にまとめて描く。
+                        overlay_lines = [
+                            (f"Track: {player.current_name()}", (10, 8), 20, (255, 255, 255)),
+                            (f"Status: {status_text}  Vol: {int(player.volume * 100)}%", (10, 38), 20, (0, 255, 0)),
+                        ]
+                        if program:
+                            p_status = program.status()
+                            if p_status["mode"] == "ready":
+                                prefix = "転換から開始: " if p_status["starts_with"] == "transition" else "開始: "
+                                program_line = f"(開始前) {prefix}{p_status['next_item']}"
+                            elif p_status["mode"] == "performing":
+                                program_line = f"上演中: {p_status['current_item']}"
+                            else:
+                                program_line = f"転換中 -> {p_status['next_item']}"
+                            overlay_lines.append((f"次第: {program_line}", (10, 68), 20, (0, 255, 255)))
+                        draw_texts_ja(frame, overlay_lines)
+                    except Exception as e:
+                        print(f"[警告] 画面表示の描画に失敗しました: {e}")
 
-                cv2.imshow("BGM Hand Sign Player (q to quit, n: next item, b: back)", frame)
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord("q"):
-                    break
-                elif key == ord("n") and program:
-                    status_text = program.advance()
-                elif key == ord("b") and program:
-                    status_text = program.back()
+                    cv2.imshow("BGM Hand Sign Player (q to quit, n: next item, b: back)", frame)
+                    key = cv2.waitKey(1) & 0xFF
+                    if key == ord("q"):
+                        break
+                    if program and key in (ord("n"), ord("b")):
+                        # qキーでの終了だけは常に効くよう、進行操作もここで保護する。
+                        try:
+                            status_text = program.advance() if key == ord("n") else program.back()
+                        except Exception as e:
+                            print(f"[エラー] 次第の進行に失敗しましたが、続行します: {e}")
 
-        cap.release()
-        cv2.destroyAllWindows()
-    else:
-        print("[INFO] ハンドサイン認識はオフです (カメラ未使用)。control.html / 音声 / API で操作してください。")
-        print("[INFO] Ctrl+C で終了します。")
-        try:
-            while True:
-                try:
-                    drain_command_queue()
-                    player.reload_library_if_changed()
-                    if program:
-                        program.reload_playlists_if_changed()
-                        program.tick()
-                        player.allowed_ids = list(program.active_playlist_ids())
-                    player.tick()
-                except Exception as e:
-                    # 本番中にここで想定外の例外(壊れたファイル等)が飛んでも
-                    # プロセス全体を落とさず、警告だけ出して進行を続ける。
-                    print(f"[エラー] 予期しない問題が発生しましたが、続行します: {e}")
-                time.sleep(0.05)
-        except KeyboardInterrupt:
-            pass
+            cap.release()
+            cv2.destroyAllWindows()
+        else:
+            print("[INFO] ハンドサイン認識はオフです (カメラ未使用)。control.html / 音声 / API で操作してください。")
+            print("[INFO] Ctrl+C で終了します。")
+            try:
+                while True:
+                    try:
+                        drain_command_queue()
+                        player.reload_library_if_changed()
+                        if program:
+                            program.reload_playlists_if_changed()
+                            program.tick()
+                            player.allowed_ids = list(program.active_playlist_ids())
+                        player.tick()
+                    except Exception as e:
+                        # 本番中にここで想定外の例外(壊れたファイル等)が飛んでも
+                        # プロセス全体を落とさず、警告だけ出して進行を続ける。
+                        print(f"[エラー] 予期しない問題が発生しましたが、続行します: {e}")
+                    time.sleep(0.05)
+            except KeyboardInterrupt:
+                pass
 
-    pygame.mixer.quit()
-    if voice_controller:
-        voice_controller.stop()
-    if api_server:
-        api_server.shutdown()
-    stop_bgm_library(bgm_library_proc)
+    finally:
+        # 例外・sys.exit・Ctrl+C のいずれで抜けても必ず後片付けする。
+        # 1つが失敗しても残りを続けたいので個別に保護する。
+        for label, cleanup in (
+            ("音声デバイス", pygame.mixer.quit),
+            ("音声認識", voice_controller.stop if voice_controller else None),
+            ("APIサーバー", api_server.shutdown if api_server else None),
+            ("bgm-library", (lambda: stop_bgm_library(bgm_library_proc))),
+        ):
+            if cleanup is None:
+                continue
+            try:
+                cleanup()
+            except Exception as e:
+                print(f"[警告] {label} の終了処理に失敗しました: {e}")
 
 
 if __name__ == "__main__":
