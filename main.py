@@ -938,6 +938,22 @@ class ProgramController:
         self._playlists_mtime = mtime
         self.playlists = load_playlists(self.player.track_dir)
 
+    def _resolve_loop(self, item: dict, playlist_field: str, track_field: str) -> bool:
+        """このBGMが最後まで流れたら先頭に戻ってループするかを、割り当て方に
+        応じて決める。
+        - プレイリスト指定: そのプレイリストの「ループ」設定に従う
+        - 単体の曲を直接指定: 1回流したら無音のまま止める(プレイリストと違い
+          「ずっと流し続けたい」という意図でわざわざ選んでいるわけではないため、
+          曲が終わるたびに勝手に繰り返されると困る場合がある)
+        - どちらも無い(旧形式のインライン指定 "bgm"): 従来通り常にループ
+        """
+        playlist_id = item.get(playlist_field)
+        if playlist_id:
+            return self._playlist_loops(playlist_id)
+        if item.get(track_field):
+            return False
+        return True
+
     def _playlist_loops(self, playlist_id) -> bool:
         """指定プレイリストが最後まで流れたら先頭に戻ってループするか。
         プレイリスト未指定(旧形式のインライン指定含む)は常にTrue(従来通り)。
@@ -992,11 +1008,11 @@ class ProgramController:
             return self._performing_fade_ms()
         return DEFAULT_FADE_MS
 
-    def _play_queue(self, track_ids, playlist_id, autoplay=True, fade_ms=DEFAULT_FADE_MS):
+    def _play_queue(self, track_ids, playlist_id, autoplay=True, fade_ms=DEFAULT_FADE_MS, loop=True):
         self.bgm_queue = track_ids
         self.bgm_pos = self.playlist_positions.get(playlist_id, 0) % len(track_ids) if playlist_id else 0
         self.active_playlist_id = playlist_id
-        self.active_playlist_loops = self._playlist_loops(playlist_id)
+        self.active_playlist_loops = loop
         track_id = self.bgm_queue[self.bgm_pos]
         ok = self.player.play_by_id(track_id, fade_ms=fade_ms) if autoplay else self.player.load_by_id(track_id)
         if not ok:
@@ -1012,7 +1028,8 @@ class ProgramController:
         item = self.items[target_idx]
         bgm_ids = self._bgm_ids(item)
         if bgm_ids:
-            self._play_queue(bgm_ids, item.get("playlistId"), fade_ms=fade_ms)
+            loop = self._resolve_loop(item, "playlistId", "trackId")
+            self._play_queue(bgm_ids, item.get("playlistId"), fade_ms=fade_ms, loop=loop)
         else:
             self.player.stop(fade_ms=fade_ms)
             self.bgm_queue = []
@@ -1035,8 +1052,9 @@ class ProgramController:
         if performing_ids:
             # 自動再生する演目は転換用BGMからフェードで切り替わり、
             # 手動再生(▶待ち)の演目はフェードしない(頭出しするだけで鳴らないため)。
+            loop = self._resolve_loop(item, "performingPlaylistId", "performingTrackId")
             self._play_queue(performing_ids, item.get("performingPlaylistId"), autoplay=autoplay,
-                              fade_ms=(DEFAULT_FADE_MS if autoplay else 0))
+                              fade_ms=(DEFAULT_FADE_MS if autoplay else 0), loop=loop)
         else:
             # BGM無しの演目でも、転換用BGMが鳴っていればフェードアウトして止める。
             self.player.stop(fade_ms=DEFAULT_FADE_MS)
