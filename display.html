@@ -105,32 +105,62 @@ function showVideo(data) {
     videoEl.src = video.url;
     videoEl.loop = true;
     lastVideoUrl = video.url;
+    resetVideoSyncTracking();
+    seekVideoTo(data.elapsed); // 演目が切り替わった直後は1回だけ頭出しする
   }
   videoEl.muted = Boolean(video.muted);
   if (video.syncPlayback) {
     if (data.playing && videoEl.paused) videoEl.play().catch(() => {});
     if (!data.playing && !videoEl.paused) videoEl.pause();
-    syncVideoPosition(data.elapsed);
+    // 一時停止中はBGMの経過秒数も止まっているので追跡する意味が無い
+    // (むしろ経過時間との差分だけが増えてシーク扱いされてしまう)。
+    // 再生中だけ追跡し、一時停止したら基準をリセットしておく。
+    if (data.playing) {
+      syncVideoPosition(data.elapsed);
+    } else {
+      resetVideoSyncTracking();
+    }
   } else if (videoEl.paused) {
     videoEl.play().catch(() => {});
   }
 }
 
-// BGMの再生位置(シークも含む)に動画の再生位置を合わせる。ポーリング間隔
-// (700ms)程度の自然なズレは無視し、大きくズレたとき(シークされた・
-// 動画の方が短くてループした等)だけ currentTime を合わせ直す
-// (毎回合わせるとカクつくため)。動画がBGMより短い場合はループ前提で
-// 経過秒数を動画の長さで割った余りに合わせる。
-const VIDEO_SYNC_DRIFT_SEC = 0.75;
-function syncVideoPosition(elapsedSec) {
+// BGMの再生位置に動画の再生位置を合わせる。videoEl.currentTimeとBGMの経過秒数は
+// 別々に動いている独立したクロックなので、常に厳密に一致させようとして毎回
+// currentTimeを書き換えると(ポーリングの遅延やデコードのジッターだけで
+// 簡単にズレるため)ほぼ毎回シークが走り、動画がカクカクになってしまう。
+// そのため「ポーリング間隔なりの自然な経過」と「シークバー操作等による
+// 不連続なジャンプ」を区別し、後者のときだけ currentTime を合わせ直す。
+const VIDEO_SEEK_JUMP_SEC = 1.5; // これ以上「想定と違う進み方」をしたらシーク扱い
+let lastKnownElapsed = null;
+let lastElapsedAt = null;
+
+function resetVideoSyncTracking() {
+  lastKnownElapsed = null;
+  lastElapsedAt = null;
+}
+
+function seekVideoTo(elapsedSec) {
   if (typeof elapsedSec !== "number" || !Number.isFinite(elapsedSec)) return;
   let target = elapsedSec;
   if (Number.isFinite(videoEl.duration) && videoEl.duration > 0) {
     target = target % videoEl.duration;
   }
-  if (Math.abs(videoEl.currentTime - target) > VIDEO_SYNC_DRIFT_SEC) {
-    videoEl.currentTime = target;
+  videoEl.currentTime = target;
+}
+
+function syncVideoPosition(elapsedSec) {
+  if (typeof elapsedSec !== "number" || !Number.isFinite(elapsedSec)) return;
+  const now = performance.now();
+  if (lastKnownElapsed != null && lastElapsedAt != null) {
+    const wallDeltaSec = (now - lastElapsedAt) / 1000;
+    const bgmDeltaSec = elapsedSec - lastKnownElapsed;
+    if (Math.abs(bgmDeltaSec - wallDeltaSec) > VIDEO_SEEK_JUMP_SEC) {
+      seekVideoTo(elapsedSec);
+    }
   }
+  lastKnownElapsed = elapsedSec;
+  lastElapsedAt = now;
 }
 
 function hideVideo() {
@@ -139,6 +169,7 @@ function hideVideo() {
   videoEl.removeAttribute("src");
   videoEl.load();
   lastVideoUrl = null;
+  resetVideoSyncTracking();
   videoEl.style.display = "none";
   appEl.style.display = "";
 }
