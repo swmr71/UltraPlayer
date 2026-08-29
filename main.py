@@ -378,6 +378,15 @@ class BGMPlayer:
         # 「一時停止/停止で意図的に音を止めた」のか「曲が自然に終わった」のかを
         # tick()側で区別するために使う (paused=Trueの間は自然終了扱いしない)。
         self.paused = False
+        # toggle_play_pause()で▶を押したとき play() と unpause() のどちらを
+        # 呼ぶべきかを区別するためのフラグ。以前は pygame.mixer.music.get_pos()
+        # が -1 かどうかで判定していたが、load_by_id() (自動再生しない上演中BGM
+        # の頭出し等) のように「読み込んだだけで一度も再生していない」状態でも
+        # 別の曲を再生した直後だと -1 以外の値が返ることがあり、その場合
+        # unpause() が呼ばれて実際には何も鳴らないまま self.playing=True に
+        # なってしまう不具合があった(直後の tick() が「曲が自然に終わった」と
+        # 誤判定し、単曲直接指定の演目ではBGMキューまで空にされてしまう)。
+        self._paused_mid_playback = False
         self.repeat = False  # 通常再生時、曲が終わったら繰り返すかどうか
         self.restricted = True  # ⏭/⏮ を allowed_ids 内の曲だけに制限するかどうか
         self.locked = False  # ONの間、control.htmlからの操作系リクエストをすべて拒否する
@@ -591,17 +600,19 @@ class BGMPlayer:
             # 次の▶で unpause -> play にフォールバックできる。
             self.playing = False
             self.paused = True
+            self._paused_mid_playback = True
             self._elapsed_base = self.elapsed_sec()
             self._elapsed_started_at = None
         else:
             try:
-                if pygame.mixer.music.get_pos() == -1:
+                if self._paused_mid_playback:
+                    pygame.mixer.music.unpause()
+                else:
                     pygame.mixer.music.play()
                     self._elapsed_base = 0.0
-                else:
-                    pygame.mixer.music.unpause()
                 self.playing = True
                 self.paused = False
+                self._paused_mid_playback = False
                 self._elapsed_started_at = time.monotonic()
             except Exception as e:
                 print(f"[警告] 再生に失敗しました: {e}")
@@ -619,6 +630,7 @@ class BGMPlayer:
             print(f"[警告] 停止に失敗しました: {e}")
         self.playing = False
         self.paused = True
+        self._paused_mid_playback = False
         self._elapsed_base = 0.0
         self._elapsed_started_at = None
 
@@ -700,6 +712,7 @@ class BGMPlayer:
             if self._load_current() and self._play_loaded(fade_ms):
                 self.playing = True
                 self.paused = False
+                self._paused_mid_playback = False
                 self._elapsed_base = 0.0
                 self._elapsed_started_at = time.monotonic()
                 return
@@ -744,6 +757,7 @@ class BGMPlayer:
                     return False
                 self.playing = True
                 self.paused = False
+                self._paused_mid_playback = False
                 self._elapsed_base = 0.0
                 self._elapsed_started_at = time.monotonic()
                 return True
@@ -763,6 +777,7 @@ class BGMPlayer:
                     return False
                 self.playing = False
                 self.paused = True
+                self._paused_mid_playback = False
                 self._elapsed_base = 0.0
                 self._elapsed_started_at = None
                 return True
