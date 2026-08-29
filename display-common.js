@@ -196,6 +196,8 @@ function hideVideo() {
   videoEl.load();
   lastVideoUrl = null;
   resetVideoSyncTracking();
+  stallLastTime = null;
+  stallLastCheckedAt = null;
   videoEl.style.display = "none";
   stageEl.style.display = "";
 }
@@ -212,7 +214,16 @@ function layoutVideoSide(data) {
     videoEl.loop = true;
     lastVideoUrl = video.url;
     resetVideoSyncTracking();
-    seekVideoTo(data.elapsed); // 演目が切り替わった直後は1回だけ頭出しする
+    stallLastTime = null;
+    stallLastCheckedAt = null;
+    // メタデータ(再生時間など)が読み込まれる前に currentTime をいじると
+    // ブラウザによっては動画がそのまま固まってしまう(ページの再読み込みでしか
+    // 復帰しなくなる)ことがあるため、loadedmetadataを待ってから1回だけ頭出しする。
+    const targetElapsed = data.elapsed;
+    videoEl.addEventListener("loadedmetadata", function onLoadedMetadata() {
+      videoEl.removeEventListener("loadedmetadata", onLoadedMetadata);
+      seekVideoTo(targetElapsed);
+    });
   }
   videoEl.muted = Boolean(video.muted);
 
@@ -232,13 +243,60 @@ function layoutVideoSide(data) {
     // 連動させない設定の動画は、読み込んだら独立して再生し続ける
     videoEl.play().catch(() => {});
   }
+  checkVideoStall();
   appEl.classList.remove("paused");
+}
+
+// ブラウザ側の問題(古いChromiumベースのOBS Browser Source等)で、
+// paused=falseなのに実際にはデコードが止まって進まなくなることがある
+// (今までページの再読み込みでしか復帰できなかった不具合)。再生中のはずなのに
+// 数秒間 currentTime が動いていなければ「固まった」と判断し、動画を読み込み
+// 直して自動的に復帰させる。
+const VIDEO_STALL_CHECK_SEC = 2.5;
+const VIDEO_STALL_MIN_PROGRESS_SEC = 0.05;
+let stallLastTime = null;
+let stallLastCheckedAt = null;
+
+function checkVideoStall() {
+  const now = performance.now();
+  if (videoEl.paused || videoEl.ended) {
+    stallLastTime = null;
+    stallLastCheckedAt = null;
+    return;
+  }
+  if (stallLastTime == null || stallLastCheckedAt == null) {
+    stallLastTime = videoEl.currentTime;
+    stallLastCheckedAt = now;
+    return;
+  }
+  if (videoEl.currentTime - stallLastTime >= VIDEO_STALL_MIN_PROGRESS_SEC) {
+    // 進んでいるので基準を更新するだけ
+    stallLastTime = videoEl.currentTime;
+    stallLastCheckedAt = now;
+    return;
+  }
+  // 進んでいない。基準時刻(最後にちゃんと進んでいたとき)からどれだけ経ったかで
+  // 固まったかどうかを判断する(進むまでは基準を更新せず、経過時間を積算し続ける)。
+  if ((now - stallLastCheckedAt) / 1000 > VIDEO_STALL_CHECK_SEC) {
+    console.warn("[display] 動画の再生が停止しているようなので読み込み直します");
+    const resumeAt = videoEl.currentTime;
+    const src = videoEl.src;
+    videoEl.load();
+    videoEl.addEventListener("loadedmetadata", function onReloaded() {
+      videoEl.removeEventListener("loadedmetadata", onReloaded);
+      videoEl.currentTime = resumeAt;
+      videoEl.play().catch(() => {});
+    });
+    videoEl.src = src;
+    stallLastTime = null;
+    stallLastCheckedAt = null;
+  }
 }
 
 // BGMの再生位置に動画の再生位置を合わせる。videoEl.currentTimeとBGMの経過秒数は
 // 別々に動いている独立したクロックなので、常に厳密に一致させようとして毎回
 // currentTimeを書き換えると(ポーリングの遅延やデコードのジッターだけで
-// 簡単に0.75秒以上ズレるため)ほぼ毎回シークが走り、動画がカクカクになって
+// 簡単にズレるため)ほぼ毎回シークが走り、動画がカクカクになって
 // しまう。そのため「ポーリング間隔なりの自然な経過」と「シークバー操作等に
 // よる不連続なジャンプ」を区別し、後者のときだけ currentTime を合わせ直す。
 const VIDEO_SEEK_JUMP_SEC = 1.5; // これ以上「想定と違う進み方」をしたらシーク扱い
