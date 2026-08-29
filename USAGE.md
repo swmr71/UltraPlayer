@@ -226,7 +226,12 @@ last.fm APIキーは https://www.lastfm.jp/api/account/create で無料取得で
   - **BGMの再生/一時停止に動画も連動させる**: ON(既定)なら▶/⏸ボタンで
     動画も一緒に再生/一時停止される(BGMが割り当てられていない演目でこれを
     ONにすると、誰も▶を押さない限り動画も再生されない点に注意)。OFFなら
-    動画は読み込まれた瞬間から自動再生を始め、BGMの操作とは独立してループし続ける
+    動画は読み込まれた瞬間から自動再生を始め、BGMの操作とは独立してループし続ける。
+    ONの間は再生位置もBGMの経過秒数に合わせて追従する(シークバーで
+    BGMの位置を変えると動画も追従してその位置に飛ぶ)。ポーリング間隔
+    (0.7秒)程度の細かいズレは無視し、0.75秒以上ズレたときだけ動画側の
+    再生位置を合わせ直す(毎回合わせるとカクつくため)。動画の方が短ければ、
+    BGMの経過秒数を動画の長さで割った余りに合わせてループ位置を合わせる
   - 動画はループ再生される。1回流したら止める、という設定は無い
 - ブラウザの自動再生ポリシー上、音声ありの動画の自動再生は環境によっては
   ブロックされることがある。OBSのBrowser Sourceは比較的緩いが、実際の配信
@@ -415,7 +420,7 @@ last.fm APIキーは https://www.lastfm.jp/api/account/create で無料取得で
 
 | メソッド | パス | 内容 |
 |---|---|---|
-| `GET` | `/now-playing` | 配信画面向け。`--program` 未使用時は `{track: {title, author, arranged, note?, durationSec?}, playing, volume, index, total_tracks, repeat, restricted, locked, elapsed, tracks}`。`elapsed`は現在の曲の再生経過秒数、`durationSec`は`bgm-library`が取得済みの場合のみ含まれる。使用時は開始前なら `{mode: "ready", starts_with: "transition"\|"performing", next_item}`、上演中なら `{mode: "performing", current_item, bgm?: {title, author, arranged, note?}, video?: {title, url, side, muted, syncPlayback}, playing?}`、転換中なら `{mode: "transition", next_item, bgm?: {title, author, arranged, note?}, video?: {title, url, side, muted, syncPlayback}, playing?}`(BGMプレイリストがある演目のみ `bgm` を、動画が割り当てられた演目のみ `video`(と`playing`)を含む。`video.url` は `/media/<filename>` の相対パス) |
+| `GET` | `/now-playing` | 配信画面向け。`--program` 未使用時は `{track: {title, author, arranged, note?, durationSec?}, playing, volume, index, total_tracks, repeat, restricted, locked, elapsed, tracks}`。`elapsed`は現在の曲の再生経過秒数、`durationSec`は`bgm-library`が取得済みの場合のみ含まれる。使用時は開始前なら `{mode: "ready", starts_with: "transition"\|"performing", next_item}`、上演中なら `{mode: "performing", current_item, bgm?: {title, author, arranged, note?}, video?: {title, url, side, muted, syncPlayback}, playing?, elapsed?}`、転換中なら `{mode: "transition", next_item, bgm?: {title, author, arranged, note?}, video?: {title, url, side, muted, syncPlayback}, playing?, elapsed?}`(BGMプレイリストがある演目のみ `bgm` を、動画が割り当てられた演目のみ `video`(と`playing`・`elapsed`)を含む。`video.url` は `/media/<filename>` の相対パス。`elapsed` は動画の`syncPlayback`用にBGMの再生経過秒数を配信画面側に伝えるためのもの) |
 | `GET` | `/media/<filename>` | 上演中に流す動画の配信用。HTTP Rangeリクエスト(部分取得・シーク)に対応。ファイル名は`videos.json`に登録されたものに限る(パストラバーサル・未登録拡張子は404) |
 | `GET` | `/admin/status` | 管理画面向け。`{player: <player.status()と同じ>, program: <programがあればadmin_status()、なければnull>}`。`program.admin_status()` は `status()` に `started`, `can_go_back`, `current_idx`, `total_items`, `items`(演目名一覧)を追加したもの。さらに転換中は `current_playlist`(`{id,title,author}` の配列)と `current_playlist_index`、それ以外は `upcoming_playlist`(次に進めると流れる予定のプレイリスト)を含む |
 | `POST` | `/command` | 再生操作。Body: `{"command": "PLAY_PAUSE"\|"STOP"\|"NEXT"\|"PREV"\|"VOL_UP"\|"VOL_DOWN"\|"REPEAT_TOGGLE"\|"RESTRICT_TOGGLE"}`。202で受理、内部のコマンドキューに積まれメインループで実行される |

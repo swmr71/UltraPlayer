@@ -217,11 +217,29 @@ function layoutVideoSide(data) {
     // BGMの再生/一時停止(data.playing)に動画も追従させる
     if (data.playing && videoEl.paused) videoEl.play().catch(() => {});
     if (!data.playing && !videoEl.paused) videoEl.pause();
+    syncVideoPosition(data.elapsed);
   } else if (videoEl.paused) {
     // 連動させない設定の動画は、読み込んだら独立して再生し続ける
     videoEl.play().catch(() => {});
   }
   appEl.classList.remove("paused");
+}
+
+// BGMの再生位置(シークも含む)に動画の再生位置を合わせる。ポーリング間隔
+// (700ms)程度の自然なズレは無視し、大きくズレたとき(シークされた・
+// 動画の方が短くてループした等)だけ currentTime を合わせ直す
+// (毎回合わせるとカクつくため)。動画がBGMより短い場合はループ前提で
+// 経過秒数を動画の長さで割った余りに合わせる。
+const VIDEO_SYNC_DRIFT_SEC = 0.75;
+function syncVideoPosition(elapsedSec) {
+  if (typeof elapsedSec !== "number" || !Number.isFinite(elapsedSec)) return;
+  let target = elapsedSec;
+  if (Number.isFinite(videoEl.duration) && videoEl.duration > 0) {
+    target = target % videoEl.duration;
+  }
+  if (Math.abs(videoEl.currentTime - target) > VIDEO_SYNC_DRIFT_SEC) {
+    videoEl.currentTime = target;
+  }
 }
 
 function render(data) {

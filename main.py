@@ -1322,6 +1322,9 @@ class ProgramController:
             if video:
                 info["video"] = video
                 info["playing"] = self.player.playing
+                # videoSyncPlayback時、動画側で再生位置(シークも含む)を
+                # BGMの経過秒数に合わせ続けるために必要。
+                info["elapsed"] = round(self.player.elapsed_sec(), 1)
             return info
         info = {
             "mode": "performing",
@@ -1335,6 +1338,8 @@ class ProgramController:
             # 動画側で「videoSyncPlayback」時に▶/⏸へ追従させるために必要
             # (bgmが無い演目でも動画だけは再生/一時停止を連動させたい場合がある)。
             info["playing"] = self.player.playing
+            # 再生位置(シークも含む)をBGMの経過秒数に合わせ続けるために必要。
+            info["elapsed"] = round(self.player.elapsed_sec(), 1)
         return info
 
     def _resolve_tracks(self, track_ids):
