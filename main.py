@@ -3,7 +3,7 @@ BGM Hand Sign Player
 =====================
 Webカメラでハンドサインを認識してBGMを操作するプレイヤー。
 
-ジェスチャaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa一覧:
+ジェスチャー一覧:
     ✋ パー (5本開く)      -> 再生 / 一時停止 トグル
     ✊ グー               -> 停止 (曲の先頭に戻る)
     👍 サムズアップ        -> 音量アップ
