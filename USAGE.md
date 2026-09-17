@@ -14,6 +14,7 @@ Web管理画面から操作できるシステム。このファイルは全機�
 - [行事の次第 (プログラム進行)](#行事の次第-プログラム進行)
 - [管理画面 (control.html)](#管理画面-controlhtml)
 - [配信用画面 (monitor1.html / monitor2.html / display.html)](#配信用画面-monitor1html--monitor2html--displayhtml)
+- [スマホでイヤモニ (sync.html)](#スマホでイヤモニ-synchtml)
 - [ハンドサイン操作](#ハンドサイン操作-hand-sign-指定時)
 - [音声コマンド](#音声コマンド---voice-指定時)
 - [links.html (リンク一覧)](#linkshtml-リンク一覧)
@@ -374,6 +375,53 @@ last.fm APIキーは https://www.lastfm.jp/api/account/create で無料取得で
   演目では、左右の区別無く画面いっぱいに動画を表示する。
 - 位置調整は `control.html` から行う(`/calib` API経由でポーリング反映、0.5〜1秒程度)。
 
+## スマホでイヤモニ (sync.html)
+
+演者のスマートフォン+有線イヤホンを、簡易的なイヤモニ(イヤーモニター)代わりに
+使う機能。操作者が「配信開始」を押した瞬間、全端末がほぼ同時
+(理論上15ms未満、実際の精度は会場のWi-Fi環境に依存)に音声の再生を始める。
+BGMプレイヤー本体(pygame経由でPCのスピーカーから流れる、観客が聞くBGM)とは
+完全に別の音声経路で、演者用に別途アップロードした音声ファイル(クリック
+トラックや演者向けにミックスを変えた音源など)をスマホのブラウザが直接再生する。
+
+**この機能が想定しているのは「ショー全体を通しで流す1本の音声を、開始の合図で
+一斉に再生し始める」使い方**(クリックトラック等)。main.pyが実際に流している
+BGMの再生/一時停止/シーク/曲切り替えには追従しない(操作者がN/B等で本編BGMを
+操作しても、演者のイヤモニ音声はそれとは無関係に開始位置から流れ続ける)。
+
+**運用の流れ:**
+
+1. `control.html` の「🎧 スマホでイヤモニ」パネルから、演者に聞かせたい音声
+   ファイル(mp3/wav/ogg/m4a/aac、上限100MB)をアップロードする。アップロード
+   一覧からクリックすると再生対象(active)を切り替えられる(🔊が付いている
+   曲が対象)。✕ボタンで削除。
+2. 演者に `http://(このPCのIP):8787/sync.html` を開いてもらい、有線イヤホンを
+   挿した状態で「タップして待機を開始」をタップしてもらう(ブラウザの自動再生
+   制限上、音を鳴らすには最初に1回タップが必須。以降は一切操作不要)。
+   **Bluetoothイヤホンは音声遅延が大きく(機種により数十〜数百ms)同期が確実に
+   ずれるため、必ず有線イヤホンを使うこと。** タップ後は自動でサーバーとの
+   時刻合わせ・音声の先読みを行い、「待機中」表示になる。
+3. 本番開始の合図で `control.html` の「開始まで(秒)」(既定3秒。各端末が音声を
+   先読み・スケジュールする時間を確保するため、あまり短くしすぎないこと)を
+   確認し、「📡 配信開始」を押す。全端末が指定時刻ちょうどに再生を開始する。
+   「■ 停止」で即座に止める(途中で止めても、次に「配信開始」を押すとまた
+   音声の頭から再生される)。
+
+**同期の仕組み:** スマホ側は `/sync/time` を何度もポーリングしてサーバーとの
+時刻オフセットを推定し(往復遅延が最小のサンプルを信用する、NTP風の手法)、
+音声は事前に丸ごとダウンロード+デコードしておく。配信開始時刻になったら
+`AudioContext` のサンプル精度スケジューリング(`AudioBufferSourceNode.start(when)`)
+で再生するため、単に「合図が来たら`<audio>`を再生する」方式よりずっと高精度になる。
+ネットワーク遅延そのものではなく、その推定誤差(揺らぎ)が最終的な同期精度を決める
+ため、混雑したWi-Fiでは誤差が広がる。会場のWi-Fiが安定しているほど精度が上がる。
+
+画面ロックすると端末によってはブラウザの音声処理が一時停止し同期がずれることが
+あるため、sync.html には**Wake Lock API**(対応端末のみ)で画面ロックを抑制する
+処理が入っているが、確実ではないので演者には「本番中は画面ロックしない・
+有線イヤホンを挿したまま」と案内すること。sync.html下部には接続状態・時刻誤差・
+往復遅延(RTT)・接続端末数が常時小さく表示される(リハーサルでの動作確認・
+トラブル切り分け用)。
+
 ## ハンドサイン操作 (`--hand-sign` 指定時)
 
 | ジェスチャー | 動作 |
@@ -444,7 +492,16 @@ last.fm APIキーは https://www.lastfm.jp/api/account/create で無料取得で
 | `POST` | `/seek` | 現在の曲の再生位置を指定秒数に移動する。Body: `{"seconds": 45}`。`control.html`のNOW PLAYINGの再生時間バーをクリックすると呼ばれる |
 | `GET` | `/calib` | モニター1・2のキャリブレーション状態 `{"1": {heightCm, yOffsetPx}, "2": {...}}` |
 | `POST` | `/calib` | キャリブレーション更新。Body例: `{"monitor": "1", "heightCm": 30}` または `{"monitor": "1", "yOffsetPx": 10}` |
-| `POST` | `/lock/toggle` | 操作ロックのON/OFFを切り替える。Body不要。`{"locked": true\|false}` を返す。ロック中は下記の操作系エンドポイント(`/command` `/seek` `/program/advance` `/program/back` `/program/reset` `/program/play-track`)がすべて `423` で拒否される(このエンドポイント自体はロック中でも常に呼べる。でないと解除できなくなるため)。`GET`系(`/now-playing` `/admin/status` `/calib`)や `/calib` の更新はロックの影響を受けない |
+| `GET` | `/sync/time` | スマホでイヤモニのクロック同期用。サーバー時刻を`{"t": ミリ秒}`で返すだけの軽量エンドポイント |
+| `GET` | `/sync/state` | スマホでイヤモニの現在状態。`{"active", "playEpochMs", "trackId", "title", "audioUrl", "clientCount"}`。クエリに`?cid=<端末固有ID>`を付けると接続端末数(`clientCount`、直近8秒以内にアクセスした端末数)の集計に使われる |
+| `GET` | `/sync/library` | スマホ同期再生用にアップロード済みの音声一覧。`{"activeId", "tracks": [{id, filename, title, addedAt}, ...]}` |
+| `GET` | `/sync/audio/<filename>` | アップロード済み音声の配信 (HTTP Range対応) |
+| `POST` | `/sync/upload` | 音声アップロード。`multipart/form-data`で`file`(mp3/wav/ogg/m4a/aac、上限100MB)と`title`(省略可)を送る。最初の1件は自動でactiveになる |
+| `POST` | `/sync/select` | 配信対象(active)を切り替える。Body: `{"trackId": "..."}`。切り替えると配信中の予定は自動で停止する |
+| `POST` | `/sync/delete` | アップロード済み音声を削除する。Body: `{"trackId": "..."}` |
+| `POST` | `/sync/start` | 配信を開始する。Body: `{"leadSeconds": 3}`(省略時3、1〜30の範囲にクランプ)。現在時刻+`leadSeconds`後を全端末共通の再生開始時刻として設定する。activeな音声が無い場合は400 |
+| `POST` | `/sync/stop` | 配信を停止する(まだ再生開始前ならキャンセル、`control.html`の「■ 停止」から呼ばれる) |
+| `POST` | `/lock/toggle` | 操作ロックのON/OFFを切り替える。Body不要。`{"locked": true\|false}` を返す。ロック中は下記の操作系エンドポイント(`/command` `/seek` `/program/advance` `/program/back` `/program/reset` `/program/play-track` `/sync/upload` `/sync/select` `/sync/delete` `/sync/start` `/sync/stop`)がすべて `423` で拒否される(このエンドポイント自体はロック中でも常に呼べる。でないと解除できなくなるため)。`GET`系(`/now-playing` `/admin/status` `/calib` `/sync/time` `/sync/state` `/sync/library` `/sync/audio/*`)や `/calib` の更新はロックの影響を受けない(演者側のsync.htmlはロック中でも問題なく動作し続ける必要があるため) |
 
 ## bgm-library API リファレンス
 

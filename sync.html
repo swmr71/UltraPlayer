@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>UltraPlayer - スマホでイヤモニ</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    width: 100%; height: 100%;
+    background: #101018;
+    color: #eee;
+    font-family: "Segoe UI", "Yu Gothic UI", sans-serif;
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+  #enable-overlay {
+    position: fixed; inset: 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 18px;
+    background: #101018;
+    z-index: 50;
+    text-align: center;
+    padding: 24px;
+  }
+  #enable-overlay h1 { font-size: 18px; font-weight: 700; }
+  #enable-overlay p { font-size: 13px; color: #999; max-width: 320px; line-height: 1.7; }
+  #enable-overlay p.warn-note {
+    color: #ff9d6b;
+    background: rgba(224,120,69,0.1);
+    border: 1px solid rgba(224,120,69,0.3);
+    border-radius: 10px;
+    padding: 10px 14px;
+  }
+  #enable-btn {
+    margin-top: 8px;
+    padding: 18px 36px;
+    font-size: 17px;
+    font-weight: 700;
+    border-radius: 999px;
+    border: 1px solid rgba(125,225,255,0.4);
+    background: rgba(125,225,255,0.14);
+    color: #7de1ff;
+  }
+  #enable-btn:active { transform: scale(0.97); background: rgba(125,225,255,0.24); }
+
+  #app {
+    display: none;
+    height: 100%;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 22px;
+    padding: 24px;
+    text-align: center;
+  }
+  #status-ring {
+    width: 150px; height: 150px;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    border: 3px solid rgba(255,255,255,0.1);
+    transition: border-color 0.3s ease, box-shadow 0.3s ease;
+  }
+  #status-ring.waiting { border-color: rgba(125,225,255,0.35); }
+  #status-ring.armed {
+    border-color: #7de1ff;
+    box-shadow: 0 0 24px rgba(125,225,255,0.35);
+  }
+  #status-ring.playing {
+    border-color: #9fd6a8;
+    box-shadow: 0 0 28px rgba(159,214,168,0.4);
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.04); }
+  }
+  #status-icon { font-size: 46px; }
+  #status-text { font-size: 15px; font-weight: 700; letter-spacing: 0.04em; }
+  #status-sub { font-size: 12.5px; color: #999; min-height: 1.4em; }
+  #track-title { font-size: 13px; color: #7de1ff; max-width: 90vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  #volume-wrap { width: min(320px, 80vw); }
+  #volume-row { display: flex; align-items: center; gap: 10px; }
+  #volume-row span:first-child { font-size: 18px; }
+  input[type="range"] { flex: 1; accent-color: #7de1ff; height: 28px; }
+
+  #diag {
+    position: fixed; bottom: 0; left: 0; right: 0;
+    display: flex; justify-content: center; gap: 14px;
+    padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+    font-size: 11px; color: #666;
+    font-variant-numeric: tabular-nums;
+    background: rgba(255,255,255,0.02);
+    border-top: 1px solid rgba(255,255,255,0.06);
+  }
+  #diag span b { color: #999; }
+  #conn-dot {
+    display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+    background: #e04545; margin-right: 4px;
+  }
+  #conn-dot.ok { background: #4ade80; }
+</style>
+</head>
+<body>
+
+<div id="enable-overlay">
+  <h1>🎧 スマホでイヤモニ</h1>
+  <p>
+    タップして待機を開始すると、本番開始の合図(操作者の「配信開始」)に合わせて
+    イヤホンからこの端末専用の音声が流れます。その後は一切操作不要です。
+    画面ロックはせず、イヤホンを挿した状態でお待ちください。
+  </p>
+  <p class="warn-note">
+    ⚠ 必ず<b>有線イヤホン</b>を使ってください。Bluetoothイヤホンは音声の遅延が
+    大きく(機種により数十〜数百ms)、他の端末や生演奏との同期が確実にずれます。
+  </p>
+  <button id="enable-btn">タップして待機を開始</button>
+</div>
+
+<div id="app">
+  <div id="status-ring" class="waiting">
+    <span id="status-icon">⏳</span>
+  </div>
+  <div>
+    <div id="status-text">同期を測定中...</div>
+    <div id="status-sub">サーバーとの時刻合わせをしています</div>
+    <div id="track-title"></div>
+  </div>
+  <div id="volume-wrap">
+    <div id="volume-row">
+      <span>🔊</span>
+      <input type="range" id="volume-slider" min="0" max="100" value="100">
+    </div>
+  </div>
+</div>
+
+<div id="diag">
+  <span><span id="conn-dot"></span><span id="conn-text">未接続</span></span>
+  <span>誤差: <b id="diag-offset">-</b></span>
+  <span>RTT: <b id="diag-rtt">-</b></span>
+  <span>端末: <b id="diag-clients">-</b></span>
+</div>
+
+<script>
+"use strict";
+// main.py がこのページ自身も配信するため、相対パスで同じオリジンを指す
+const TIME_URL = "/sync/time";
+const STATE_URL = "/sync/state";
+
+const CLIENT_ID = (() => {
+  try {
+    let id = localStorage.getItem("ultraplayer_sync_cid");
+    if (!id) {
+      id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      localStorage.setItem("ultraplayer_sync_cid", id);
+    }
+    return id;
+  } catch (e) {
+    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+})();
+
+const enableOverlay = document.getElementById("enable-overlay");
+const enableBtn = document.getElementById("enable-btn");
+const app = document.getElementById("app");
+const statusRing = document.getElementById("status-ring");
+const statusIcon = document.getElementById("status-icon");
+const statusText = document.getElementById("status-text");
+const statusSub = document.getElementById("status-sub");
+const trackTitleEl = document.getElementById("track-title");
+const volumeSlider = document.getElementById("volume-slider");
+const connDot = document.getElementById("conn-dot");
+const connText = document.getElementById("conn-text");
+const diagOffset = document.getElementById("diag-offset");
+const diagRtt = document.getElementById("diag-rtt");
+const diagClients = document.getElementById("diag-clients");
+
+let audioCtx = null;
+let gainNode = null;
+
+// --- クロック同期 (NTP風: 往復遅延が最小のサンプルほど信用できるオフセット推定になる) ---
+let offsetMs = null;      // 推定 (サーバー時刻 - この端末のローカル時刻)
+let bestRttMs = Infinity;
+
+function localEpochNow() {
+  // performance.now() は Date.now() よりドリフトが少なく分解能も高いので、
+  // これを起点にした epoch 時刻をローカル時計の基準として使う。
+  return performance.timeOrigin + performance.now();
+}
+
+async function sampleClockOffset() {
+  const t0 = localEpochNow();
+  let res;
+  try {
+    res = await fetch(TIME_URL, { cache: "no-store" });
+  } catch (e) {
+    return false;
+  }
+  const t2 = localEpochNow();
+  if (!res.ok) return false;
+  const data = await res.json();
+  const rtt = t2 - t0;
+  // 往復遅延の半分だけサーバー時刻が進んでいると仮定した中間点推定 (Cristianのアルゴリズム)。
+  // 遅延が非対称だと誤差が乗るため、複数サンプルのうちRTTが最小のものだけ採用することで
+  // ネットワークジッタの影響をできるだけ排除する。
+  const estOffset = data.t - (t0 + t2) / 2;
+  if (rtt <= bestRttMs) {
+    bestRttMs = rtt;
+    offsetMs = estOffset;
+  } else if (offsetMs == null) {
+    offsetMs = estOffset; // 初回はRTTが悪くても無いよりはまし
+  }
+  diagOffset.textContent = offsetMs != null ? `${offsetMs.toFixed(1)}ms` : "-";
+  diagRtt.textContent = `${bestRttMs === Infinity ? rtt.toFixed(1) : bestRttMs.toFixed(1)}ms`;
+  return true;
+}
+
+async function calibrateClock(rounds) {
+  for (let i = 0; i < rounds; i++) {
+    await sampleClockOffset();
+    await new Promise(r => setTimeout(r, 60));
+  }
+}
+
+// --- 音声の先読み・デコード ---
+let currentTrackId = null;
+let audioBuffer = null;
+let loadingTrackId = null;
+
+async function ensureAudioLoaded(track) {
+  if (!track || !track.audioUrl) return;
+  if (track.trackId === currentTrackId && audioBuffer) return;
+  if (loadingTrackId === track.trackId) return;
+  loadingTrackId = track.trackId;
+  setStatus("waiting", "🎵", "音声を準備中...", track.title || "");
+  try {
+    const res = await fetch(track.audioUrl, { cache: "force-cache" });
+    const arrBuf = await res.arrayBuffer();
+    const decoded = await audioCtx.decodeAudioData(arrBuf);
+    audioBuffer = decoded;
+    currentTrackId = track.trackId;
+  } catch (e) {
+    audioBuffer = null;
+    currentTrackId = null;
+  } finally {
+    if (loadingTrackId === track.trackId) loadingTrackId = null;
+  }
+}
+
+// --- 再生スケジューリング ---
+let scheduledForEpoch = null;
+let activeSource = null;
+
+function stopActiveSource() {
+  if (activeSource) {
+    try { activeSource.stop(); } catch (e) { /* 既に止まっている */ }
+    activeSource = null;
+  }
+}
+
+function scheduleFrom(playEpochMs) {
+  if (!audioBuffer || offsetMs == null) return;
+  if (scheduledForEpoch === playEpochMs) return; // 同じ開始指示は1回しかスケジュールしない
+  scheduledForEpoch = playEpochMs;
+  stopActiveSource();
+
+  // サーバー時刻での開始予定 → このAudioContextの時計(currentTime)に変換する。
+  // performance.now()とAudioContext.currentTimeは同じ単調クロックに基づくため、
+  // 「今」の両者の値を同時にサンプリングすれば、そのままオフセットとして使える。
+  const perfNow = performance.now();
+  const ctxNow = audioCtx.currentTime;
+  const localEpochAtCtxNow = performance.timeOrigin + perfNow;
+  const localTargetEpoch = playEpochMs - offsetMs; // サーバー時刻→ローカル時刻
+  const deltaSec = (localTargetEpoch - localEpochAtCtxNow) / 1000;
+  let when = ctxNow + deltaSec;
+  let bufferOffset = 0;
+
+  if (when < ctxNow) {
+    // 既に開始予定時刻を過ぎている(接続復帰直後など)。曲の途中から追いつく。
+    bufferOffset = ctxNow - when;
+    if (bufferOffset >= audioBuffer.duration) {
+      // 曲の長さより遅れている場合はすぐに頭から鳴らす(無音より復帰優先)
+      bufferOffset = 0;
+    }
+    when = ctxNow + 0.03;
+  }
+
+  const source = audioCtx.createBufferSource();
+  source.buffer = audioBuffer;
+  source.connect(gainNode);
+  source.start(when, bufferOffset);
+  activeSource = source;
+
+  const leadMs = (when - ctxNow) * 1000;
+  if (leadMs > 50) {
+    setStatus("armed", "🕒", "再生予定あり", `あと約 ${(leadMs / 1000).toFixed(1)} 秒`);
+    setTimeout(() => {
+      if (activeSource === source) setStatus("playing", "🔊", "再生中", "");
+    }, Math.max(0, leadMs));
+  } else {
+    setStatus("playing", "🔊", "再生中", "");
+  }
+}
+
+function setStatus(mode, icon, text, sub) {
+  statusRing.className = mode;
+  statusIcon.textContent = icon;
+  statusText.textContent = text;
+  statusSub.textContent = sub;
+}
+
+// --- 配信状態のポーリング ---
+let lastTrackId = null;
+
+async function pollState() {
+  let res;
+  try {
+    res = await fetch(`${STATE_URL}?cid=${encodeURIComponent(CLIENT_ID)}`, { cache: "no-store" });
+  } catch (e) {
+    connDot.classList.remove("ok");
+    connText.textContent = "未接続";
+    return;
+  }
+  if (!res.ok) {
+    connDot.classList.remove("ok");
+    connText.textContent = "未接続";
+    return;
+  }
+  connDot.classList.add("ok");
+  connText.textContent = "接続中";
+  const data = await res.json();
+  diagClients.textContent = typeof data.clientCount === "number" ? `${data.clientCount}台` : "-";
+  trackTitleEl.textContent = data.title ? `🎵 ${data.title}` : "";
+
+  if (data.trackId && data.trackId !== lastTrackId) {
+    lastTrackId = data.trackId;
+    scheduledForEpoch = null;
+    await ensureAudioLoaded(data);
+    if (!data.active) {
+      setStatus("waiting", "✅", "待機中", "準備完了。開始を待っています");
+    }
+  }
+
+  if (data.active && data.playEpochMs) {
+    if (!audioBuffer && data.trackId) {
+      await ensureAudioLoaded(data);
+    }
+    scheduleFrom(data.playEpochMs);
+  } else {
+    if (scheduledForEpoch !== null) {
+      // 停止指示。今すぐ止める
+      stopActiveSource();
+      scheduledForEpoch = null;
+      setStatus("waiting", "✅", "待機中", audioBuffer ? "準備完了。開始を待っています" : "");
+    } else if (!audioBuffer) {
+      setStatus("waiting", "⏳", "待機中", "配信音声の設定を待っています");
+    }
+  }
+}
+
+// --- 音量 ---
+volumeSlider.addEventListener("input", () => {
+  if (gainNode) gainNode.gain.value = volumeSlider.value / 100;
+});
+
+// --- 画面点灯を保つ(可能なら)。取れなくても致命的ではないので無視 ---
+let wakeLock = null;
+async function requestWakeLock() {
+  try {
+    if ("wakeLock" in navigator) {
+      wakeLock = await navigator.wakeLock.request("screen");
+    }
+  } catch (e) { /* 対応していない/拒否された場合は諦める */ }
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") {
+    requestWakeLock();
+    if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
+  }
+});
+
+// --- 起動 (ユーザー操作必須: AudioContextのアンロックのため) ---
+enableBtn.addEventListener("click", async () => {
+  enableOverlay.style.display = "none";
+  app.style.display = "flex";
+
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  await audioCtx.resume();
+  gainNode = audioCtx.createGain();
+  gainNode.gain.value = volumeSlider.value / 100;
+  gainNode.connect(audioCtx.destination);
+
+  requestWakeLock();
+
+  setStatus("waiting", "📡", "同期を測定中...", "サーバーとの時刻合わせをしています");
+  await calibrateClock(15);
+
+  pollState();
+  setInterval(pollState, 1000);
+  setInterval(sampleClockOffset, 4000); // 再生開始後も常時オフセットを更新し続ける(次回の開始精度向上のため)
+}, { once: true });
+</script>
+</body>
+</html>

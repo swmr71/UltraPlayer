@@ -55,9 +55,10 @@ import re
 import shutil
 import signal
 import subprocess
+import uuid
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, parse_qs
 
 import pygame
 from PIL import Image, ImageDraw, ImageFont
@@ -1481,6 +1482,128 @@ class CalibStore:
             return json.loads(json.dumps(self.state))
 
 
+class SyncAudioStore:
+    """スマホ同期再生用の音声ライブラリ管理 (sync-audio/manifest.json)。
+
+    アップロードされた音声は sync-audio/<uuid>.<ext> に保存し、manifest.json に
+    {id, filename, title, addedAt} の配列として記録する。このうちどれを配信するかは
+    activeId で管理する (トラック切り替えUIから選択)。
+    """
+
+    DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sync-audio")
+    MANIFEST_PATH = os.path.join(DIR, "manifest.json")
+    ALLOWED_EXTS = {".mp3", ".wav", ".ogg", ".m4a", ".aac"}
+    CONTENT_TYPES = {
+        ".mp3": "audio/mpeg",
+        ".wav": "audio/wav",
+        ".ogg": "audio/ogg",
+        ".m4a": "audio/mp4",
+        ".aac": "audio/aac",
+    }
+    MAX_FILE_BYTES = 100 * 1024 * 1024  # 100MB
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        os.makedirs(self.DIR, exist_ok=True)
+        self.state = {"activeId": None, "tracks": []}
+        self._load()
+
+    def _load(self):
+        if os.path.isfile(self.MANIFEST_PATH):
+            try:
+                with open(self.MANIFEST_PATH, "r", encoding="utf-8") as f:
+                    saved = json.load(f)
+                if isinstance(saved.get("tracks"), list):
+                    self.state["tracks"] = saved["tracks"]
+                if saved.get("activeId"):
+                    self.state["activeId"] = saved["activeId"]
+            except Exception:
+                pass
+
+    def _save(self):
+        try:
+            with open(self.MANIFEST_PATH, "w", encoding="utf-8") as f:
+                json.dump(self.state, f, ensure_ascii=False)
+        except Exception:
+            pass
+
+    def list(self):
+        with self.lock:
+            return json.loads(json.dumps(self.state))
+
+    def get_active(self):
+        with self.lock:
+            active_id = self.state["activeId"]
+            for t in self.state["tracks"]:
+                if t["id"] == active_id:
+                    return dict(t)
+            return None
+
+    def add(self, filename, title):
+        with self.lock:
+            entry = {"id": uuid.uuid4().hex, "filename": filename, "title": title, "addedAt": time.time()}
+            self.state["tracks"].append(entry)
+            # 最初の1件は自動でactiveにする(毎回選び直す手間を省く)。2件目以降は
+            # 明示的に /sync/select で切り替えるまで今のactiveのまま。
+            if not self.state["activeId"]:
+                self.state["activeId"] = entry["id"]
+            self._save()
+            return dict(entry)
+
+    def select(self, track_id):
+        with self.lock:
+            if not any(t["id"] == track_id for t in self.state["tracks"]):
+                return False
+            self.state["activeId"] = track_id
+            self._save()
+            return True
+
+    def delete(self, track_id):
+        with self.lock:
+            entry = next((t for t in self.state["tracks"] if t["id"] == track_id), None)
+            if entry is None:
+                return None
+            self.state["tracks"] = [t for t in self.state["tracks"] if t["id"] != track_id]
+            if self.state["activeId"] == track_id:
+                self.state["activeId"] = self.state["tracks"][0]["id"] if self.state["tracks"] else None
+            self._save()
+            try:
+                os.remove(os.path.join(self.DIR, entry["filename"]))
+            except OSError:
+                pass
+            return entry
+
+
+class SyncBroadcastState:
+    """スマホ同期再生の配信状態(配信中かどうか・開始予定時刻)を保持する。
+
+    play_epoch_ms はサーバーの time.time()*1000 基準で「いつ再生を開始するか」の
+    予定時刻。スマホ側は /sync/time で測定したサーバー時刻とのオフセットを使って
+    これを自分のAudioContextの時計に変換し、サンプル精度でスケジュール再生する
+    (詳細はsync.html参照)。再生対象の音声自体はSyncAudioStore側のactiveIdが
+    指す曲(トラック切り替え時はここもstop()して配信中断する)。
+    """
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.active = False
+        self.play_epoch_ms = None
+
+    def start(self, lead_seconds: float):
+        with self.lock:
+            self.active = True
+            self.play_epoch_ms = time.time() * 1000 + lead_seconds * 1000
+
+    def stop(self):
+        with self.lock:
+            self.active = False
+            self.play_epoch_ms = None
+
+    def snapshot(self):
+        with self.lock:
+            return {"active": self.active, "playEpochMs": self.play_epoch_ms}
+
+
 # ------------------------------------------------------------
 # 現在再生中の曲情報 & キャリブレーション状態を外部から取得/更新するための簡易HTTP API
 # ------------------------------------------------------------
@@ -1504,6 +1627,10 @@ def make_now_playing_server(
     """
 
     calib_store = CalibStore()
+    sync_store = SyncAudioStore()
+    sync_broadcast = SyncBroadcastState()
+    sync_clients: dict = {}  # cid -> 最終アクセス時刻。接続中スマホ台数の概算表示用
+    sync_clients_lock = threading.Lock()
     VALID_COMMANDS = {
         "PLAY_PAUSE", "STOP", "NEXT", "PREV", "VOL_UP", "VOL_DOWN",
         "REPEAT_TOGGLE", "RESTRICT_TOGGLE",
@@ -1615,10 +1742,42 @@ def make_now_playing_server(
                 })
             elif self.path == "/calib":
                 self._send_json(calib_store.get())
+            elif self.path == "/sync/time":
+                # スマホ側のクロック同期(NTP風のオフセット測定)用。往復遅延の
+                # 誤差をできるだけ減らすため、他の処理を挟まず直前に時刻を取る。
+                self._send_json({"t": time.time() * 1000})
+            elif self.path.startswith("/sync/state"):
+                self._handle_sync_state()
+            elif self.path == "/sync/library":
+                self._send_json(sync_store.list())
+            elif self.path.startswith("/sync/audio/"):
+                self._serve_sync_audio()
             elif self.path.startswith("/media/"):
                 self._serve_media()
             else:
                 self._serve_static()
+
+        def _handle_sync_state(self):
+            query = parse_qs(urlsplit(self.path).query)
+            cid = (query.get("cid") or [None])[0]
+            with sync_clients_lock:
+                now = time.time()
+                if cid:
+                    sync_clients[cid] = now
+                stale = [k for k, ts in sync_clients.items() if now - ts > 8]
+                for k in stale:
+                    del sync_clients[k]
+                client_count = len(sync_clients)
+            b = sync_broadcast.snapshot()
+            track = sync_store.get_active()
+            self._send_json({
+                "active": b["active"],
+                "playEpochMs": b["playEpochMs"],
+                "trackId": track["id"] if track else None,
+                "title": track["title"] if track else None,
+                "audioUrl": f"/sync/audio/{track['filename']}" if track else None,
+                "clientCount": client_count,
+            })
 
         # links.html / control.html / monitor1-2.html / display.html などを
         # このAPIサーバー自身から配信する。これにより `python -m http.server`
@@ -1733,11 +1892,147 @@ def make_now_playing_server(
             except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
                 pass  # ブラウザがシーク等で途中の接続を切っただけ。エラー扱いにしない
 
+        # スマホ同期再生用の音声配信 (/sync/audio/<filename>)。iOS Safariの<audio>や
+        # fetch+decodeAudioDataでの先読みでもRangeリクエストが来ることがあるため、
+        # 動画と同じくRangeに対応する。ファイル名の検証は動画配信と同じ正規表現を使う。
+        def _serve_sync_audio(self):
+            filename = os.path.basename(self.path.split("?", 1)[0])
+            ext = os.path.splitext(filename)[1].lower()
+            if not self.MEDIA_FILENAME_RE.match(filename) or ext not in SyncAudioStore.CONTENT_TYPES:
+                self.send_response(404)
+                self.end_headers()
+                return
+            file_path = os.path.join(SyncAudioStore.DIR, filename)
+            if not os.path.isfile(file_path):
+                self.send_response(404)
+                self.end_headers()
+                return
+
+            content_type = SyncAudioStore.CONTENT_TYPES[ext]
+            file_size = os.path.getsize(file_path)
+            start, end = 0, file_size - 1
+            is_partial = False
+
+            range_header = self.headers.get("Range")
+            if range_header:
+                m = self.MEDIA_RANGE_RE.match(range_header)
+                if not m:
+                    self.send_response(416)
+                    self.send_header("Content-Range", f"bytes */{file_size}")
+                    self.end_headers()
+                    return
+                start_s, end_s = m.groups()
+                start = int(start_s) if start_s else 0
+                end = min(int(end_s), file_size - 1) if end_s else file_size - 1
+                if start > end or start >= file_size:
+                    self.send_response(416)
+                    self.send_header("Content-Range", f"bytes */{file_size}")
+                    self.end_headers()
+                    return
+                is_partial = True
+
+            length = end - start + 1
+            self.send_response(206 if is_partial else 200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Length", str(length))
+            if is_partial:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
+            self.end_headers()
+
+            try:
+                with open(file_path, "rb") as f:
+                    f.seek(start)
+                    remaining = length
+                    while remaining > 0:
+                        chunk = f.read(min(self.MEDIA_CHUNK_SIZE, remaining))
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        remaining -= len(chunk)
+            except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+                pass
+
+        # スマホ同期再生の音声アップロード (multipart/form-data) を手書きでパースする。
+        # cgi.FieldStorage は3.13で削除され、標準ライブラリに他の選択肢が無いため、
+        # 「file」「title」の2フィールドだけを想定した最小限のパーサーを自前で書く。
+        @staticmethod
+        def _parse_multipart(body: bytes, boundary: bytes):
+            fields = {}
+            for part in body.split(b"--" + boundary):
+                part = part.strip(b"\r\n")
+                if not part or part == b"--":
+                    continue
+                if b"\r\n\r\n" not in part:
+                    continue
+                header_blob, content = part.split(b"\r\n\r\n", 1)
+                content = content[:-2] if content.endswith(b"\r\n") else content
+                disp = ""
+                for line in header_blob.split(b"\r\n"):
+                    if line.lower().startswith(b"content-disposition:"):
+                        disp = line.decode("utf-8", "replace")
+                        break
+                name_m = re.search(r'name="([^"]*)"', disp)
+                if not name_m:
+                    continue
+                field_name = name_m.group(1)
+                filename_m = re.search(r'filename="([^"]*)"', disp)
+                if filename_m:
+                    fields[field_name] = {"filename": filename_m.group(1), "content": content}
+                else:
+                    fields[field_name] = content.decode("utf-8", "replace")
+            return fields
+
+        def _handle_sync_upload(self):
+            ctype = self.headers.get("Content-Type") or ""
+            m = re.match(r'multipart/form-data;\s*boundary=(.+)', ctype)
+            if not m:
+                self._send_json({"error": "multipart/form-data (boundary付き) で送信してください"}, status=415)
+                return
+            boundary = m.group(1).strip().strip('"').encode("utf-8")
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+            except ValueError:
+                self._send_json({"error": "Content-Length が不正です"}, status=400)
+                return
+            max_bytes = SyncAudioStore.MAX_FILE_BYTES + 1024 * 1024  # ファイル本体+フォームの余白分
+            if length <= 0 or length > max_bytes:
+                self._send_json(
+                    {"error": f"ファイルサイズが大きすぎます(上限 {SyncAudioStore.MAX_FILE_BYTES // (1024 * 1024)}MB)"},
+                    status=413,
+                )
+                return
+            body = self.rfile.read(length)
+            fields = self._parse_multipart(body, boundary)
+            file_field = fields.get("file")
+            if not isinstance(file_field, dict) or not file_field.get("content"):
+                self._send_json({"error": "file フィールドが必要です"}, status=400)
+                return
+            title = (fields.get("title") or "").strip() or os.path.splitext(file_field["filename"])[0]
+            ext = os.path.splitext(file_field["filename"])[1].lower()
+            if ext not in SyncAudioStore.ALLOWED_EXTS:
+                self._send_json(
+                    {"error": f"対応していない拡張子です ({', '.join(sorted(SyncAudioStore.ALLOWED_EXTS))})"},
+                    status=400,
+                )
+                return
+            stored_filename = f"{uuid.uuid4().hex}{ext}"
+            file_path = os.path.join(SyncAudioStore.DIR, stored_filename)
+            try:
+                with open(file_path, "wb") as f:
+                    f.write(file_field["content"])
+            except OSError as e:
+                self._send_json({"error": f"保存に失敗しました: {e}"}, status=500)
+                return
+            entry = sync_store.add(stored_filename, title)
+            self._send_json(entry, status=201)
+
         # 操作ロック中は拒否するエンドポイント (/lock/toggle自体はここに含めない。
         # 含めるとロック中に解除できなくなってしまうため)。
         LOCKABLE_PATHS = {
             "/command", "/seek",
             "/program/advance", "/program/back", "/program/reset", "/program/play-track",
+            "/sync/upload", "/sync/select", "/sync/delete", "/sync/start", "/sync/stop",
         }
 
         def _do_POST(self):
@@ -1828,6 +2123,48 @@ def make_now_playing_server(
                     else:
                         command_queue.put(f"PROGRAM_PLAY_TRACK:{track_id}")
                         self._send_json({"queued": "PROGRAM_PLAY_TRACK"}, status=202)
+            elif self.path == "/sync/upload":
+                self._handle_sync_upload()
+            elif self.path == "/sync/select":
+                payload = self._read_json_body()
+                if payload is None:
+                    return
+                track_id = payload.get("trackId")
+                if not track_id or not sync_store.select(track_id):
+                    self._send_json({"error": "trackId が見つかりません"}, status=400)
+                    return
+                sync_broadcast.stop()  # 曲を切り替えたら配信中の予定はいったん取り消す
+                self._send_json({"activeId": track_id})
+            elif self.path == "/sync/delete":
+                payload = self._read_json_body()
+                if payload is None:
+                    return
+                track_id = payload.get("trackId")
+                entry = sync_store.delete(track_id) if track_id else None
+                if not entry:
+                    self._send_json({"error": "trackId が見つかりません"}, status=400)
+                    return
+                sync_broadcast.stop()
+                self._send_json({"deleted": track_id})
+            elif self.path == "/sync/start":
+                payload = self._read_json_body()
+                if payload is None:
+                    return
+                if sync_store.get_active() is None:
+                    self._send_json({"error": "配信する音声が選択されていません"}, status=400)
+                    return
+                try:
+                    lead_seconds = float(payload.get("leadSeconds", 3))
+                except (TypeError, ValueError):
+                    lead_seconds = 3.0
+                if not math.isfinite(lead_seconds):
+                    lead_seconds = 3.0
+                lead_seconds = max(1.0, min(30.0, lead_seconds))
+                sync_broadcast.start(lead_seconds)
+                self._send_json(sync_broadcast.snapshot())
+            elif self.path == "/sync/stop":
+                sync_broadcast.stop()
+                self._send_json(sync_broadcast.snapshot())
             else:
                 self.send_response(404)
                 self.end_headers()
