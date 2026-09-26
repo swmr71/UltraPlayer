@@ -29,7 +29,7 @@ Web管理画面から操作できるシステム。このファイルは全機�
 | コンポーネント | 役割 | 既定ポート |
 |---|---|---|
 | `main.py` | BGM再生本体。ハンドサイン/音声/API経由の操作を受け付け、状態をHTTP APIで公開。`control.html`・`monitor1/2.html`・`display.html`・`links.html` もこの中から配信する | `8787` |
-| `bgm-library/` (Node.js) | 曲のアップロード・YouTubeダウンロード・AIボーカル除去・行事の次第の編集 | `4000` |
+| `bgm-library/` (Node.js) | 曲のアップロード・YouTubeダウンロード・AIボーカル除去・行事の次第の編集・イヤモニ音声の紐付け管理 | `4000` |
 
 `bgm-library` は `main.py` 起動時に子プロセスとして自動的に一緒に起動される
 (`node` と `node_modules` が揃っている場合。`--no-library` で無効化可)。
@@ -103,7 +103,10 @@ python main.py --dir ./tracks --hand-sign --camera 0 --cooldown 1.0 --voice --ap
 
 ## BGMライブラリ管理 (bgm-library)
 
-`http://127.0.0.1:4000` で開く管理画面。曲は `tracks/tracks.json` に
+`http://127.0.0.1:4000` で開く管理画面。セクションが多く縦に長くなったため、
+画面上部のタブ(🎵 曲・動画 / 📋 プレイリスト / 🎬 行事の次第 / 🎧 イヤモニ)で
+切り替える構成になっている(前回開いていたタブはブラウザに記憶される)。
+曲は `tracks/tracks.json` に
 `{id, filename, title, displayTitle, author, arranged, note, sourceUrl?, sourceTrackId?}`
 の形で記録され、実ファイルは `tracks/<id>.mp3` として保存される。
 
@@ -391,14 +394,14 @@ A'を紐付けていない場合は、フォールバックとして本編の音
 
 **運用の流れ:**
 
-1. `control.html` の「🎧 スマホでイヤモニ」パネルから、演者に聞かせたい改造版
-   音声(A')ファイル(mp3/wav/ogg/m4a/aac、上限100MB)をアップロードする際、
-   「紐付けるBGM曲」で対応する本編ライブラリの曲(A)を選ぶ。本編でその曲Aが
-   流れている間、自動的にこのA'がイヤモニに流れるようになる。曲Aと同じ長さで
-   ある必要はない(本編側の経過秒数を自分の音声の長さで周期的に丸めて追従する)。
-   アップロード済みの各曲の紐付け先は、一覧の▾セレクトからいつでも変更できる。
-   ✕ボタンで削除。「今流れているBGM」欄で、今どの曲がどのA'(または未紐付けで
-   フォールバック中か)に対応しているかを確認できる。
+1. `bgm-library`(`http://127.0.0.1:4000`)の「🎧 イヤモニ」タブから、演者に
+   聞かせたい改造版音声(A')ファイル(mp3/wav/ogg/m4a/aac、上限100MB)を
+   アップロードする際、「紐付けるBGM曲」で対応する本編ライブラリの曲(A)を選ぶ。
+   本編でその曲Aが流れている間、自動的にこのA'がイヤモニに流れるようになる。
+   曲Aと同じ長さである必要はない(本編側の経過秒数を自分の音声の長さで周期的に
+   丸めて追従する)。アップロード済みの各曲の紐付け先は、一覧のセレクトから
+   いつでも変更できる。削除ボタンで削除。実際の配信・再生は`main.py`側
+   (`sync.html`)が行うため、テストする際は`main.py`も起動しておくこと。
 2. 演者に `http://(このPCのIP):8787/sync.html` を開いてもらい、有線イヤホンを
    挿した状態で「タップして待機を開始」をタップしてもらう(ブラウザの自動再生
    制限上、音を鳴らすには最初に1回タップが必須。以降は一切操作不要)。
@@ -486,7 +489,7 @@ A'を紐付けていない場合は、フォールバックとして本編の音
 | メソッド | パス | 内容 |
 |---|---|---|
 | `GET` | `/now-playing` | 配信画面向け。`--program` 未使用時は `{track: {title, author, arranged, note?, durationSec?}, playing, volume, index, total_tracks, repeat, restricted, locked, elapsed, tracks}`。`elapsed`は現在の曲の再生経過秒数、`durationSec`は`bgm-library`が取得済みの場合のみ含まれる。使用時は開始前なら `{mode: "ready", starts_with: "transition"\|"performing", next_item}`、上演中なら `{mode: "performing", current_item, bgm?: {title, author, arranged, note?}, video?: {title, url, side, muted, syncPlayback}, playing?, elapsed?}`、転換中なら `{mode: "transition", next_item, bgm?: {title, author, arranged, note?}, video?: {title, url, side, muted, syncPlayback}, playing?, elapsed?}`(BGMプレイリストがある演目のみ `bgm` を、動画が割り当てられた演目のみ `video`(と`playing`・`elapsed`)を含む。`video.url` は `/media/<filename>` の相対パス。`elapsed` は動画の`syncPlayback`用にBGMの再生経過秒数を配信画面側に伝えるためのもの) |
-| `GET` | `/media/<filename>` | 上演中に流す動画の配信用。HTTP Rangeリクエスト(部分取得・シーク)に対応。ファイル名は`videos.json`に登録されたものに限る(パストラバーサル・未登録拡張子は404) |
+| `GET` | `/media/<filename>` | 上演中に流す動画・演者用イヤモニ音声(A')・本編音源(A、イヤモニのフォールバック用)の配信用。HTTP Rangeリクエスト(部分取得・シーク)に対応。ファイル名は許可された拡張子(mp4/webm/mov/mkv/mp3/wav/ogg/m4a/aac)の単純な形のものに限る(パストラバーサル・未登録拡張子は404) |
 | `GET` | `/admin/status` | 管理画面向け。`{player: <player.status()と同じ>, program: <programがあればadmin_status()、なければnull>}`。`program.admin_status()` は `status()` に `started`, `can_go_back`, `current_idx`, `total_items`, `items`(演目名一覧)を追加したもの。さらに転換中は `current_playlist`(`{id,title,author}` の配列)と `current_playlist_index`、それ以外は `upcoming_playlist`(次に進めると流れる予定のプレイリスト)を含む |
 | `POST` | `/command` | 再生操作。Body: `{"command": "PLAY_PAUSE"\|"STOP"\|"NEXT"\|"PREV"\|"VOL_UP"\|"VOL_DOWN"\|"REPEAT_TOGGLE"\|"RESTRICT_TOGGLE"}`。202で受理、内部のコマンドキューに積まれメインループで実行される |
 | `POST` | `/program/advance` | 次第を次の演目へ進める(`--program` 未指定時は400) |
@@ -497,14 +500,8 @@ A'を紐付けていない場合は、フォールバックとして本編の音
 | `GET` | `/calib` | モニター1・2のキャリブレーション状態 `{"1": {heightCm, yOffsetPx}, "2": {...}}` |
 | `POST` | `/calib` | キャリブレーション更新。Body例: `{"monitor": "1", "heightCm": 30}` または `{"monitor": "1", "yOffsetPx": 10}` |
 | `GET` | `/sync/time` | スマホでイヤモニのクロック同期用。サーバー時刻を`{"t": ミリ秒}`で返すだけの軽量エンドポイント |
-| `GET` | `/sync/follow` | スマホでイヤモニが今追従すべき状態。`{"playing", "elapsedSec", "asOfServerMs", "trackId", "iemTrackId", "audioUrl", "title", "usingFallback", "clientCount"}`(本編でBGMがロードされていなければ`audioUrl`等は`null`)。クエリに`?cid=<端末固有ID>`を付けると接続端末数(`clientCount`、直近8秒以内にアクセスした端末数)の集計に使われる |
-| `GET` | `/sync/library` | イヤモニ用にアップロード済みの音声(A')一覧。`{"tracks": [{id, filename, title, linkedTrackId, addedAt}, ...]}`。`linkedTrackId`は本編ライブラリの曲(A)のid、無ければ`null`(未紐付け) |
-| `GET` | `/sync/audio/<filename>` | アップロード済みイヤモニ用音声(A')の配信 (HTTP Range対応) |
-| `GET` | `/sync/original-audio/<filename>` | 未紐付けの曲のフォールバック用に、本編ライブラリの音声(A)をそのまま配信 (HTTP Range対応) |
-| `POST` | `/sync/upload` | 音声(A')アップロード。`multipart/form-data`で`file`(mp3/wav/ogg/m4a/aac、上限100MB)・`title`(省略可)・`linkedTrackId`(省略可、本編ライブラリの曲id)を送る |
-| `POST` | `/sync/relink` | アップロード済み音声(A')の紐付け先を変更する。Body: `{"trackId": "...", "linkedTrackId": "..."\|null}` |
-| `POST` | `/sync/delete` | アップロード済み音声(A')を削除する。Body: `{"trackId": "..."}` |
-| `POST` | `/lock/toggle` | 操作ロックのON/OFFを切り替える。Body不要。`{"locked": true\|false}` を返す。ロック中は下記の操作系エンドポイント(`/command` `/seek` `/program/advance` `/program/back` `/program/reset` `/program/play-track` `/sync/upload` `/sync/relink` `/sync/delete`)がすべて `423` で拒否される(このエンドポイント自体はロック中でも常に呼べる。でないと解除できなくなるため)。`GET`系(`/now-playing` `/admin/status` `/calib` `/sync/time` `/sync/follow` `/sync/library` `/sync/audio/*` `/sync/original-audio/*`)や `/calib` の更新はロックの影響を受けない(演者側のsync.htmlはロック中でも問題なく動作し続ける必要があるため) |
+| `GET` | `/sync/follow` | スマホでイヤモニが今追従すべき状態。`{"playing", "elapsedSec", "asOfServerMs", "trackId", "iemTrackId", "audioUrl", "title", "usingFallback", "clientCount"}`(本編でBGMがロードされていなければ`audioUrl`等は`null`)。`audioUrl`は紐付け済みなら`iem-audio.json`の音声、未紐付けなら本編と同じ曲を指す(どちらも`/media/<filename>`)。クエリに`?cid=<端末固有ID>`を付けると接続端末数(`clientCount`、直近8秒以内にアクセスした端末数)の集計に使われる |
+| `POST` | `/lock/toggle` | 操作ロックのON/OFFを切り替える。Body不要。`{"locked": true\|false}` を返す。ロック中は下記の操作系エンドポイント(`/command` `/seek` `/program/advance` `/program/back` `/program/reset` `/program/play-track`)がすべて `423` で拒否される(このエンドポイント自体はロック中でも常に呼べる。でないと解除できなくなるため)。`GET`系(`/now-playing` `/admin/status` `/calib` `/sync/time` `/sync/follow` `/media/*`)や `/calib` の更新はロックの影響を受けない(演者側のsync.htmlはロック中でも問題なく動作し続ける必要があるため) |
 
 ## bgm-library API リファレンス
 
@@ -534,6 +531,10 @@ A'を紐付けていない場合は、フォールバックとして本編の音
 | `POST` | `/api/videos` | 動画ファイルアップロード (multipart/form-data: `file`, `title`, `displayTitle?`) |
 | `POST` | `/api/videos/from-youtube` | YouTubeから映像+音声をダウンロードして登録。Body: `{url, title, displayTitle?}`。音声のみのダウンロードより時間がかかる |
 | `DELETE` | `/api/videos/:id` | 動画を削除(ファイルごと)。行事の次第から参照中なら `warning` を返す |
+| `GET` | `/api/iem-audio` | イヤモニ(演者用)音声一覧を返す。各要素は`{id, filename, title, linkedTrackId, createdAt}` |
+| `POST` | `/api/iem-audio` | イヤモニ音声アップロード (multipart/form-data: `file`(mp3/wav/ogg/m4a/aac、上限100MB), `title?`, `linkedTrackId?`(本編ライブラリの曲id。省略なら未紐付け)) |
+| `PATCH` | `/api/iem-audio/:id` | 紐付け先/タイトルの変更 (`linkedTrackId`(`null`で未紐付けに戻す)・`title`の一部) |
+| `DELETE` | `/api/iem-audio/:id` | イヤモニ音声を削除(ファイルごと) |
 
 ## bgm-libraryでの編集をmain.py再起動なしで反映する
 
@@ -555,6 +556,10 @@ A'を紐付けていない場合は、フォールバックとして本編の音
 - `program.json`(行事の次第そのもの、演目の追加・削除・BGM割り当て)は
   現状この自動反映の対象外。次第の構成を変えた場合は `main.py` の再起動が
   必要(進行中の演目インデックスが食い違う事故を避けるため)。
+- **イヤモニ音声(iem-audio.json)**: `/sync/follow` が呼ばれるたび(sync.htmlから
+  約0.7秒間隔)にファイルをその場で読み直すため、他と違って再起動はおろか
+  ポーリング待ちすら無く、アップロード・紐付け変更・削除が次のリクエストから
+  即座に反映される。
 
 ## 操作ロック
 

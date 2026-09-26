@@ -53,8 +53,8 @@
     <div class="desc">再生操作・音量・プレイリスト・次第の進行・配信画面の位置調整</div>
   </a>
   <a class="card" id="bgm-library-link" href="http://127.0.0.1:4000" target="_blank" rel="noopener">
-    <div class="name">bgm-library - 曲のアップロード/管理</div>
-    <div class="desc">音源アップロード・YouTubeダウンロード・作者検索・次第へのBGM割り当て</div>
+    <div class="name">bgm-library - 曲/動画/プレイリスト/次第/イヤモニの管理</div>
+    <div class="desc">音源アップロード・YouTubeダウンロード・作者検索・次第へのBGM割り当て・イヤモニ音声の紐付け(タブで切り替え)</div>
     <div class="url" id="bgm-library-url">http://127.0.0.1:4000</div>
   </a>
 
@@ -84,8 +84,7 @@
     <div><b>POST</b> /program/advance - 次第を次の演目へ進める</div>
     <div><b>POST</b> /program/back - 直前の進行を1つ取り消す</div>
     <div><b>GET/POST</b> /calib - 配信画面のキャリブレーション状態</div>
-    <div><b>GET</b> /sync/time, /sync/follow, /sync/library - スマホでイヤモニの時刻同期・追従状態・音声一覧</div>
-    <div><b>POST</b> /sync/upload, /sync/relink, /sync/delete - スマホでイヤモニの音声管理(control.htmlから)</div>
+    <div><b>GET</b> /sync/time, /sync/follow - スマホでイヤモニの時刻同期・追従状態(音声のアップロード/紐付け管理はbgm-library側)</div>
   </div>
 
   <p class="note">

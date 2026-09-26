@@ -43,6 +43,7 @@ const PROGRAM_FILE = path.resolve(__dirname, process.env.PROGRAM_FILE || "../pro
 const LIBRARY_FILE = path.join(TRACKS_DIR, "tracks.json");
 const PLAYLISTS_FILE = path.join(TRACKS_DIR, "playlists.json");
 const VIDEOS_FILE = path.join(TRACKS_DIR, "videos.json");
+const IEM_AUDIO_FILE = path.join(TRACKS_DIR, "iem-audio.json");
 
 const LASTFM_API_KEY = process.env.LASTFM_API_KEY || "";
 const YT_DLP_CMD = process.env.YT_DLP_CMD || "yt-dlp";
@@ -207,6 +208,26 @@ function loadVideos() {
 
 function saveVideos(list) {
   writeJsonAtomic(VIDEOS_FILE, list);
+}
+
+// ------------------------------------------------------------
+// イヤモニ(演者用)音声ライブラリ (iem-audio.json) の読み書き
+// 本編の曲(tracks.json側のid)に改造版の音声を紐付けて登録しておくと、
+// main.py(sync.html)がそれを読み、本編でその曲が流れている間だけ自動的に
+// 演者のイヤモニへ流す。音声ファイル自体もtracks.jsonの曲と同じTRACKS_DIRに
+// 保存し、main.py側の /media/<filename> でそのまま配信できるようにする。
+// ------------------------------------------------------------
+function loadIemAudio() {
+  if (!fs.existsSync(IEM_AUDIO_FILE)) return [];
+  try {
+    return JSON.parse(fs.readFileSync(IEM_AUDIO_FILE, "utf-8"));
+  } catch {
+    return [];
+  }
+}
+
+function saveIemAudio(list) {
+  writeJsonAtomic(IEM_AUDIO_FILE, list);
 }
 
 // ------------------------------------------------------------
@@ -496,6 +517,23 @@ const uploadVideo = multer({
   limits: { fileSize: 500 * 1024 * 1024 },
 });
 
+const ALLOWED_IEM_EXT = new Set([".mp3", ".wav", ".ogg", ".m4a", ".aac"]);
+
+const uploadIemAudio = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => cb(null, TRACKS_DIR),
+    filename: (req, file, cb) => {
+      const ext = path.extname(file.originalname).toLowerCase();
+      cb(null, `${uuidv4()}${ALLOWED_IEM_EXT.has(ext) ? ext : ".mp3"}`);
+    },
+  }),
+  fileFilter: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    cb(null, ALLOWED_IEM_EXT.has(ext));
+  },
+  limits: { fileSize: 100 * 1024 * 1024 },
+});
+
 // 曲一覧
 app.get("/api/tracks", (req, res) => {
   res.json(loadLibrary());
@@ -680,6 +718,80 @@ app.delete("/api/videos/:id", asyncRoute(async (req, res) => {
   const program = loadProgram();
   const stillUsed = program.some((item) => item.performingVideoId === entry.id);
   res.json({ deleted: entry.id, warning: stillUsed ? "行事の次第から参照されたままです" : null });
+}));
+
+// イヤモニ(演者用)音声一覧
+app.get("/api/iem-audio", (req, res) => {
+  res.json(loadIemAudio());
+});
+
+// イヤモニ音声アップロード。紐付け先(本編ライブラリの曲id)は任意(空欄なら未紐付け)
+app.post("/api/iem-audio", uploadIemAudio.single("file"), asyncRoute(async (req, res) => {
+  if (!req.file) {
+    res.status(400).json({ error: "音声ファイル(mp3/wav/ogg/m4a/aac)を指定してください" });
+    return;
+  }
+  const linkedTrackId = (req.body.linkedTrackId || "").trim() || null;
+  if (linkedTrackId && !loadLibrary().some((t) => t.id === linkedTrackId)) {
+    fs.unlink(req.file.path, () => {});
+    res.status(400).json({ error: "紐付け先の曲が曲ライブラリに見つかりません" });
+    return;
+  }
+
+  const entry = {
+    id: path.parse(req.file.filename).name,
+    filename: req.file.filename,
+    title: (req.body.title || "").trim() || path.parse(req.file.originalname).name,
+    linkedTrackId,
+    createdAt: new Date().toISOString(),
+  };
+  await withLock(() => {
+    const list = loadIemAudio();
+    list.push(entry);
+    saveIemAudio(list);
+  });
+  res.status(201).json(entry);
+}));
+
+// イヤモニ音声の紐付け先/タイトルを変更する
+app.patch("/api/iem-audio/:id", asyncRoute(async (req, res) => {
+  if (typeof req.body.linkedTrackId === "string" && req.body.linkedTrackId &&
+      !loadLibrary().some((t) => t.id === req.body.linkedTrackId)) {
+    res.status(400).json({ error: "紐付け先の曲が曲ライブラリに見つかりません" });
+    return;
+  }
+  const entry = await withLock(() => {
+    const list = loadIemAudio();
+    const found = list.find((t) => t.id === req.params.id);
+    if (!found) return null;
+    if (typeof req.body.title === "string" && req.body.title.trim()) found.title = req.body.title.trim();
+    if ("linkedTrackId" in req.body) found.linkedTrackId = req.body.linkedTrackId || null;
+    saveIemAudio(list);
+    return found;
+  });
+  if (!entry) {
+    res.status(404).json({ error: "not found" });
+    return;
+  }
+  res.json(entry);
+}));
+
+// イヤモニ音声削除
+app.delete("/api/iem-audio/:id", asyncRoute(async (req, res) => {
+  const entry = await withLock(() => {
+    const list = loadIemAudio();
+    const idx = list.findIndex((t) => t.id === req.params.id);
+    if (idx === -1) return null;
+    const [removed] = list.splice(idx, 1);
+    saveIemAudio(list);
+    return removed;
+  });
+  if (!entry) {
+    res.status(404).json({ error: "not found" });
+    return;
+  }
+  fs.unlink(path.join(TRACKS_DIR, entry.filename), () => {});
+  res.json({ deleted: entry.id });
 }));
 
 // ボーカル除去 (Demucs) を実行し、インストゥルメンタル版を新しい曲として登録する

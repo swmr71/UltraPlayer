@@ -72,6 +72,21 @@
   tr.track-child-row td { border-bottom-color: #2c2f38; }
   tr.track-child-row + tr:not(.track-child-row) td { border-top: 2px solid #383b45; }
   .child-indicator { font-size: 11px; color: #7de1ff; margin-bottom: 2px; padding-left: 14px; }
+
+  .tabbar {
+    display: flex; gap: 6px; flex-wrap: wrap;
+    margin: 16px 0 20px;
+    position: sticky; top: 0; z-index: 20;
+    background: #1b1d23; padding: 8px 0;
+  }
+  .tab-btn {
+    background: #262933; color: #ccc; border: 1px solid #383b45;
+    padding: 8px 16px; border-radius: 6px; font-size: 13px; margin-top: 0;
+  }
+  .tab-btn.active { background: #4f7cff; color: #fff; border-color: #4f7cff; }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+  select#iem-link-select { width: 100%; box-sizing: border-box; }
 </style>
 </head>
 <body>
@@ -79,7 +94,15 @@
   <h1>BGMライブラリ管理</h1>
   <p class="muted">アップロードした曲はUUIDファイル名で保存され、曲名・表示用曲名(伏字対応)・作者・注記を管理できます。</p>
 
-  <h2>YouTubeからダウンロード</h2>
+  <div class="tabbar">
+    <button class="tab-btn" data-tab="tracks" type="button">🎵 曲・動画</button>
+    <button class="tab-btn" data-tab="playlists" type="button">📋 プレイリスト</button>
+    <button class="tab-btn" data-tab="program" type="button">🎬 行事の次第</button>
+    <button class="tab-btn" data-tab="iem" type="button">🎧 イヤモニ</button>
+  </div>
+
+  <div class="tab-panel" data-tab="tracks">
+  <h2 style="margin-top:0;">YouTubeからダウンロード</h2>
   <div class="card">
     <label>YouTube URL</label>
     <div class="row-inline">
@@ -177,20 +200,52 @@
     <h3>登録済みの動画</h3>
     <div id="video-list"></div>
   </div>
+  </div>
 
-  <h2>転換用プレイリスト</h2>
+  <div class="tab-panel" data-tab="playlists">
+  <h2 style="margin-top:0;">転換用プレイリスト</h2>
   <div class="card">
-    <p class="muted">名前を付けたプレイリストを作っておき、下の「行事の次第」で各演目の転換に付け外しできます。同じプレイリストを複数の演目で使い回せます。</p>
+    <p class="muted">名前を付けたプレイリストを作っておき、「行事の次第」で各演目の転換に付け外しできます。同じプレイリストを複数の演目で使い回せます。</p>
     <div id="playlist-manager-list"></div>
     <button class="secondary" id="btn-add-playlist" type="button">プレイリストを新規作成</button>
   </div>
+  </div>
 
-  <h2>行事の次第 (演目とBGMの割り当て)</h2>
+  <div class="tab-panel" data-tab="program">
+  <h2 style="margin-top:0;">行事の次第 (演目とBGMの割り当て)</h2>
   <div class="card">
     <div id="program-list"></div>
     <button class="secondary" id="btn-add-item" type="button">演目を追加</button>
     <button id="btn-save-program" type="button">次第を保存</button>
     <span class="muted" id="program-status"></span>
+  </div>
+  </div>
+
+  <div class="tab-panel" data-tab="iem">
+  <h2 style="margin-top:0;">🎧 スマホでイヤモニ (演者用)</h2>
+  <div class="card">
+    <p class="muted">
+      本編で曲Aが流れている間、対応する改造版の音声A'を演者のスマホ(有線イヤホン推奨)に
+      自動追従で流せます。実際の配信・再生はmain.py側(<code>sync.html</code>)が行うため、
+      main.pyが起動している必要があります。紐付けを付けなかった曲は、本編と同じ音声が
+      そのままイヤモニに流れます(無音にはなりません)。
+    </p>
+
+    <label>音声ファイル (mp3 / wav / ogg / m4a / aac)</label>
+    <input type="file" id="iem-file" accept=".mp3,.wav,.ogg,.m4a,.aac" />
+
+    <label>タイトル (空欄ならファイル名)</label>
+    <input type="text" id="iem-title" placeholder="例: INMU KING (イヤモニ用ミックス)" />
+
+    <label>紐付けるBGM曲 (空欄なら未紐付け)</label>
+    <select id="iem-link-select"></select>
+
+    <button id="btn-iem-upload" type="button">アップロード</button>
+    <span class="muted" id="iem-upload-status"></span>
+
+    <h3>登録済みのイヤモニ音声</h3>
+    <div id="iem-list"></div>
+  </div>
   </div>
 </section>
 
@@ -199,6 +254,28 @@ let library = [];
 let program = [];
 let playlists = [];
 let videos = [];
+let iemAudio = [];
+
+// ------------------------------------------------------------
+// タブ切り替え (曲・動画 / プレイリスト / 次第 / イヤモニ)。セクションが
+// 増えて縦に長くなりすぎたため、見たいものだけ表示するようにした。
+// ------------------------------------------------------------
+function switchTab(tab) {
+  document.querySelectorAll(".tab-btn").forEach(b => b.classList.toggle("active", b.dataset.tab === tab));
+  document.querySelectorAll(".tab-panel").forEach(p => p.classList.toggle("active", p.dataset.tab === tab));
+  try { localStorage.setItem("bgmlib_tab", tab); } catch {}
+}
+document.querySelectorAll(".tab-btn").forEach(btn => {
+  btn.addEventListener("click", () => switchTab(btn.dataset.tab));
+});
+(() => {
+  let initialTab = "tracks";
+  try {
+    const saved = localStorage.getItem("bgmlib_tab");
+    if (saved && document.querySelector(`.tab-btn[data-tab="${saved}"]`)) initialTab = saved;
+  } catch {}
+  switchTab(initialTab);
+})();
 
 // ------------------------------------------------------------
 // 試し聞き (/tracks-file/<filename> を1つの<audio>で再生する。
@@ -283,6 +360,7 @@ async function refreshLibrary() {
   renderLibrary();
   renderPlaylistManager();
   renderProgram();
+  renderIemList(); // 紐付け先の選択肢(曲名)が最新化されるよう再描画
 }
 
 async function refreshProgram() {
@@ -311,6 +389,105 @@ async function refreshVideos() {
   renderVideoLibrary();
   renderProgram();
 }
+
+// ------------------------------------------------------------
+// イヤモニ(演者用)音声ライブラリ。本編の曲(library)に改造版音声を紐付けて
+// 登録しておくと、main.py(sync.html)がその曲の再生中だけ自動でイヤモニに流す。
+// ------------------------------------------------------------
+async function refreshIemAudio() {
+  iemAudio = await fetchArray("/api/iem-audio");
+  renderIemList();
+}
+
+function trackTitleById(id) {
+  const t = library.find(t => t.id === id);
+  return t ? t.title : null;
+}
+
+function iemLinkOptionsHtml(selectedId) {
+  const opts = ['<option value="">(未紐付け: 本編と同じ音声を流す)</option>'];
+  for (const t of library) {
+    const sel = t.id === selectedId ? " selected" : "";
+    opts.push(`<option value="${t.id}"${sel}>${escapeHtml(t.title)}</option>`);
+  }
+  return opts.join("");
+}
+
+function renderIemList() {
+  const linkSelect = document.getElementById("iem-link-select");
+  // 本人がプルダウンを開いている最中に選択肢を書き換えて混乱させないよう、
+  // フォーカスが無いときだけ再構築する(他のセレクトと同じ流儀)。
+  if (document.activeElement !== linkSelect) {
+    const prev = linkSelect.value;
+    linkSelect.innerHTML = iemLinkOptionsHtml(null);
+    if (prev && library.some(t => t.id === prev)) linkSelect.value = prev;
+  }
+
+  const listEl = document.getElementById("iem-list");
+  if (!iemAudio.length) {
+    listEl.innerHTML = `<p class="muted">まだイヤモニ用音声はアップロードされていません。</p>`;
+    return;
+  }
+  listEl.innerHTML = "";
+  iemAudio.forEach(a => {
+    const linkedTitle = a.linkedTrackId ? trackTitleById(a.linkedTrackId) : null;
+    const row = document.createElement("div");
+    row.className = "playlist-card";
+    row.innerHTML = `
+      <div class="row-inline">
+        <strong>🎧 ${escapeHtml(a.title)}</strong>
+      </div>
+      <select data-iem-relink="${a.id}" style="width:100%;box-sizing:border-box;margin-top:6px;">${iemLinkOptionsHtml(a.linkedTrackId)}</select>
+      ${a.linkedTrackId && !linkedTitle ? '<p class="muted" style="color:#ff9d9d;">⚠ 紐付け先の曲が見つかりません(削除された可能性があります)</p>' : ""}
+      <button class="danger" data-iem-remove="${a.id}" type="button">削除</button>
+    `;
+    listEl.appendChild(row);
+    row.querySelector("[data-iem-relink]").addEventListener("change", async (e) => {
+      await fetch(`/api/iem-audio/${a.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ linkedTrackId: e.target.value || null }),
+      });
+      await refreshIemAudio();
+    });
+    row.querySelector("[data-iem-remove]").addEventListener("click", async () => {
+      if (!confirm(`「${a.title}」を削除しますか?`)) return;
+      await fetch(`/api/iem-audio/${a.id}`, { method: "DELETE" });
+      await refreshIemAudio();
+    });
+  });
+}
+
+document.getElementById("btn-iem-upload").addEventListener("click", async () => {
+  const fileInput = document.getElementById("iem-file");
+  const titleInput = document.getElementById("iem-title");
+  const linkSelect = document.getElementById("iem-link-select");
+  const statusEl = document.getElementById("iem-upload-status");
+  const file = fileInput.files[0];
+  if (!file) {
+    statusEl.textContent = "ファイルを選んでください";
+    return;
+  }
+  const form = new FormData();
+  form.append("file", file);
+  if (titleInput.value.trim()) form.append("title", titleInput.value.trim());
+  if (linkSelect.value) form.append("linkedTrackId", linkSelect.value);
+  statusEl.textContent = "アップロード中...";
+  try {
+    const res = await fetch("/api/iem-audio", { method: "POST", body: form });
+    const data = await res.json();
+    if (!res.ok) {
+      statusEl.textContent = `失敗: ${data.error || res.status}`;
+      return;
+    }
+    statusEl.textContent = "アップロード完了";
+    fileInput.value = "";
+    titleInput.value = "";
+    await refreshIemAudio();
+  } catch (e) {
+    statusEl.textContent = "アップロードに失敗しました";
+  }
+});
 
 // 動画の試し見。試し聞き(previewAudio)とは別に<video>を1つ持ち、
 // ボタンを押すたびに再生/一時停止をトグルする。
@@ -1305,6 +1482,7 @@ async function initStep(label, fn) {
   await initStep("プレイリストの読み込み", refreshPlaylists);
   await initStep("動画一覧の読み込み", refreshVideos);
   await initStep("行事の次第の読み込み", refreshProgram);
+  await initStep("イヤモニ音声一覧の読み込み", refreshIemAudio);
 })();
 </script>
 </body>

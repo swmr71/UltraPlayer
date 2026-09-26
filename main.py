@@ -55,7 +55,6 @@ import re
 import shutil
 import signal
 import subprocess
-import uuid
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit, parse_qs
@@ -1482,103 +1481,43 @@ class CalibStore:
             return json.loads(json.dumps(self.state))
 
 
-class SyncAudioStore:
-    """演者用イヤモニ(sync.html)の音声ライブラリ管理 (sync-audio/manifest.json)。
+def load_iem_audio(track_dir: str) -> list:
+    """tracks/iem-audio.json (bgm-libraryで管理する演者用イヤモニ音声ライブラリ) を
+    [{"id", "filename", "title", "linkedTrackId"}, ...] のリストとして読み込む。
+    ファイルが無ければ空リストを返す(イヤモニ機能を使っていない場合はこれで良い)。
 
-    アップロードされた音声(本編BGMの改造版などA')は sync-audio/<uuid>.<ext> に
-    保存し、manifest.json に {id, filename, title, linkedTrackId, addedAt} の
-    配列として記録する。linkedTrackId は「main.pyの再生ライブラリのどの曲(A)に
-    対応するか」を指すBGMトラックのid(tracks.json側のid)。本編でそのidの曲が
-    流れている間、対応するA'を自動でイヤモニに流す(sync.html側の追従ロジックは
-    /sync/follow を参照)。linkedTrackIdが無い(紐付けていない)エントリは
-    /sync/follow からは使われない(本編でそのA'を直接流す手段は無い。あくまで
-    「本編の曲Aの代わりに流す音声」としてのみ機能する)。
+    アップロード・紐付け変更・削除はすべて bgm-library 側のUI/APIで行う
+    (main.pyはこのファイルを読むだけで、書き込みは一切しない)。linkedTrackId は
+    「main.pyの再生ライブラリのどの曲(A)に対応するか」を指すBGMトラックのid
+    (tracks.json側のid)。本編でそのidの曲が流れている間、対応する音声(A')を
+    自動でイヤモニに流す(sync.html側の追従ロジックは /sync/follow を参照)。
+    音声ファイル自体もtracks.jsonの曲と同じ track_dir に保存されるため、
+    配信は動画と同じ /media/<filename> をそのまま使う。
     """
-
-    DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sync-audio")
-    MANIFEST_PATH = os.path.join(DIR, "manifest.json")
-    ALLOWED_EXTS = {".mp3", ".wav", ".ogg", ".m4a", ".aac"}
-    CONTENT_TYPES = {
-        ".mp3": "audio/mpeg",
-        ".wav": "audio/wav",
-        ".ogg": "audio/ogg",
-        ".m4a": "audio/mp4",
-        ".aac": "audio/aac",
-    }
-    MAX_FILE_BYTES = 100 * 1024 * 1024  # 100MB
-
-    def __init__(self):
-        self.lock = threading.Lock()
-        os.makedirs(self.DIR, exist_ok=True)
-        self.state = {"tracks": []}
-        self._load()
-
-    def _load(self):
-        if os.path.isfile(self.MANIFEST_PATH):
-            try:
-                with open(self.MANIFEST_PATH, "r", encoding="utf-8") as f:
-                    saved = json.load(f)
-                if isinstance(saved.get("tracks"), list):
-                    for t in saved["tracks"]:
-                        t.setdefault("linkedTrackId", None)
-                    self.state["tracks"] = saved["tracks"]
-            except Exception:
-                pass
-
-    def _save(self):
-        try:
-            with open(self.MANIFEST_PATH, "w", encoding="utf-8") as f:
-                json.dump(self.state, f, ensure_ascii=False)
-        except Exception:
-            pass
-
-    def list(self):
-        with self.lock:
-            return json.loads(json.dumps(self.state))
-
-    def find_by_linked_track(self, track_id):
-        if not track_id:
-            return None
-        with self.lock:
-            for t in self.state["tracks"]:
-                if t.get("linkedTrackId") == track_id:
-                    return dict(t)
-            return None
-
-    def add(self, filename, title, linked_track_id):
-        with self.lock:
-            entry = {
-                "id": uuid.uuid4().hex,
-                "filename": filename,
-                "title": title,
-                "linkedTrackId": linked_track_id or None,
-                "addedAt": time.time(),
-            }
-            self.state["tracks"].append(entry)
-            self._save()
-            return dict(entry)
-
-    def relink(self, track_id, linked_track_id):
-        with self.lock:
-            entry = next((t for t in self.state["tracks"] if t["id"] == track_id), None)
-            if entry is None:
-                return None
-            entry["linkedTrackId"] = linked_track_id or None
-            self._save()
-            return dict(entry)
-
-    def delete(self, track_id):
-        with self.lock:
-            entry = next((t for t in self.state["tracks"] if t["id"] == track_id), None)
-            if entry is None:
-                return None
-            self.state["tracks"] = [t for t in self.state["tracks"] if t["id"] != track_id]
-            self._save()
-            try:
-                os.remove(os.path.join(self.DIR, entry["filename"]))
-            except OSError:
-                pass
-            return entry
+    path = os.path.join(track_dir, "iem-audio.json")
+    if not os.path.isfile(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            entries = json.load(f)
+    except Exception as e:
+        print(f"[警告] iem-audio.jsonの読み込みに失敗しました: {e}")
+        return []
+    if not isinstance(entries, list):
+        print("[警告] iem-audio.json は音声の配列である必要があります")
+        return []
+    result = []
+    for e in entries:
+        if not isinstance(e, dict) or not isinstance(e.get("id"), str) or not isinstance(e.get("filename"), str):
+            print(f"[警告] iem-audio.json に id/filename を持たない要素があるため読み飛ばします: {e!r:.60}")
+            continue
+        result.append({
+            "id": e["id"],
+            "filename": e["filename"],
+            "title": e.get("title") or e["filename"],
+            "linkedTrackId": e.get("linkedTrackId"),
+        })
+    return result
 
 
 # ------------------------------------------------------------
@@ -1604,7 +1543,6 @@ def make_now_playing_server(
     """
 
     calib_store = CalibStore()
-    sync_store = SyncAudioStore()
     sync_clients: dict = {}  # cid -> 最終アクセス時刻。接続中スマホ台数の概算表示用
     sync_clients_lock = threading.Lock()
     VALID_COMMANDS = {
@@ -1724,12 +1662,6 @@ def make_now_playing_server(
                 self._send_json({"t": time.time() * 1000})
             elif self.path.startswith("/sync/follow"):
                 self._handle_sync_follow()
-            elif self.path == "/sync/library":
-                self._send_json(sync_store.list())
-            elif self.path.startswith("/sync/audio/"):
-                self._serve_sync_audio()
-            elif self.path.startswith("/sync/original-audio/"):
-                self._serve_sync_original_audio()
             elif self.path.startswith("/media/"):
                 self._serve_media()
             else:
@@ -1766,16 +1698,21 @@ def make_now_playing_server(
             elapsed = player.elapsed_sec()
             as_of_server_ms = time.time() * 1000  # elapsed直後に取得し、計測のズレを最小化する
 
-            iem = sync_store.find_by_linked_track(track["id"])
+            iem = next(
+                (e for e in load_iem_audio(player.track_dir) if e["linkedTrackId"] == track["id"]),
+                None,
+            )
             if iem:
-                audio_url = f"/sync/audio/{iem['filename']}"
+                # イヤモニ音声もtracks.jsonの曲と同じtrack_dirに保存される
+                # (bgm-libraryが管理)ため、動画と同じ /media/<filename> で配信できる。
+                audio_url = f"/media/{iem['filename']}"
                 title = iem["title"]
                 using_fallback = False
                 iem_id = iem["id"]
             else:
                 # 紐付けが無い曲は、本編と同じ音声(A)をそのままフォールバックで流す。
                 filename = os.path.basename(track["path"])
-                audio_url = f"/sync/original-audio/{filename}"
+                audio_url = f"/media/{filename}"
                 # 「未紐付け」等の注記はクライアント側(usingFallbackを見て)で付ける。
                 # ここでtitleに含めてしまうと各クライアントの表示と二重になる。
                 title = track["displayTitle"]
@@ -1835,16 +1772,23 @@ def make_now_playing_server(
             self.end_headers()
             self.wfile.write(body)
 
-        # 上演中に流す動画の配信用 (/media/<filename>)。bgm-libraryの動画ライブラリで
-        # 登録した動画ファイルは音源と同じ track_dir に保存されている。
-        # HTML5の<video>はシーク/バッファリングにHTTP Rangeリクエストを使うため、
-        # Rangeヘッダに対応していないとブラウザによっては再生自体ができない。
+        # 上演中に流す動画・演者用イヤモニ音声の配信用 (/media/<filename>)。
+        # bgm-libraryの動画ライブラリ/イヤモニ音声ライブラリで登録したファイルは
+        # どちらも音源と同じ track_dir に保存されている。
+        # HTML5の<video>や音声のfetch+decodeAudioDataでの先読みはシーク/バッファ
+        # リングにHTTP Rangeリクエストを使うため、Rangeヘッダに対応していないと
+        # ブラウザによっては再生自体ができない。
         MEDIA_FILENAME_RE = re.compile(r"^[A-Za-z0-9_-]+\.[A-Za-z0-9]+$")
         MEDIA_CONTENT_TYPES = {
             ".mp4": "video/mp4",
             ".webm": "video/webm",
             ".mov": "video/quicktime",
             ".mkv": "video/x-matroska",
+            ".mp3": "audio/mpeg",
+            ".wav": "audio/wav",
+            ".ogg": "audio/ogg",
+            ".m4a": "audio/mp4",
+            ".aac": "audio/aac",
         }
         MEDIA_RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
         MEDIA_CHUNK_SIZE = 256 * 1024
@@ -1863,9 +1807,7 @@ def make_now_playing_server(
                 return
             self._send_file_with_range(file_path, self.MEDIA_CONTENT_TYPES[ext])
 
-        # HTTP Rangeリクエストに対応したファイル配信の共通処理。動画(/media/)・
-        # イヤモニ用音声(/sync/audio/, /sync/original-audio/)のいずれも
-        # ファイルパスと存在チェックだけ済ませて渡せば同じロジックで配信できる。
+        # HTTP Rangeリクエストに対応したファイル配信の共通処理。
         def _send_file_with_range(self, file_path, content_type):
             file_size = os.path.getsize(file_path)
             start, end = 0, file_size - 1
@@ -1911,126 +1853,11 @@ def make_now_playing_server(
             except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
                 pass  # ブラウザがシーク等で途中の接続を切っただけ。エラー扱いにしない
 
-        # 演者用イヤモニ(sync.html)向けにアップロードされた音声の配信 (/sync/audio/<filename>)。
-        # iOS Safariの<audio>やfetch+decodeAudioDataでの先読みでもRangeリクエストが
-        # 来ることがあるため、動画と同じくRangeに対応する。
-        def _serve_sync_audio(self):
-            filename = os.path.basename(self.path.split("?", 1)[0])
-            ext = os.path.splitext(filename)[1].lower()
-            if not self.MEDIA_FILENAME_RE.match(filename) or ext not in SyncAudioStore.CONTENT_TYPES:
-                self.send_response(404)
-                self.end_headers()
-                return
-            file_path = os.path.join(SyncAudioStore.DIR, filename)
-            if not os.path.isfile(file_path):
-                self.send_response(404)
-                self.end_headers()
-                return
-            self._send_file_with_range(file_path, SyncAudioStore.CONTENT_TYPES[ext])
-
-        # イヤモニの紐付けが無い曲を、本編と同じ音声(A)のフォールバックとして
-        # イヤモニ側に配信する (/sync/original-audio/<filename>)。本編ライブラリの
-        # フォルダ(player.track_dir)からそのまま配信する。
-        def _serve_sync_original_audio(self):
-            filename = os.path.basename(self.path.split("?", 1)[0])
-            ext = os.path.splitext(filename)[1].lower()
-            if not self.MEDIA_FILENAME_RE.match(filename) or ext not in SyncAudioStore.CONTENT_TYPES:
-                self.send_response(404)
-                self.end_headers()
-                return
-            file_path = os.path.join(player.track_dir, filename)
-            if not os.path.isfile(file_path):
-                self.send_response(404)
-                self.end_headers()
-                return
-            self._send_file_with_range(file_path, SyncAudioStore.CONTENT_TYPES[ext])
-
-        # スマホ同期再生の音声アップロード (multipart/form-data) を手書きでパースする。
-        # cgi.FieldStorage は3.13で削除され、標準ライブラリに他の選択肢が無いため、
-        # 「file」「title」の2フィールドだけを想定した最小限のパーサーを自前で書く。
-        @staticmethod
-        def _parse_multipart(body: bytes, boundary: bytes):
-            fields = {}
-            for part in body.split(b"--" + boundary):
-                part = part.strip(b"\r\n")
-                if not part or part == b"--":
-                    continue
-                if b"\r\n\r\n" not in part:
-                    continue
-                header_blob, content = part.split(b"\r\n\r\n", 1)
-                content = content[:-2] if content.endswith(b"\r\n") else content
-                disp = ""
-                for line in header_blob.split(b"\r\n"):
-                    if line.lower().startswith(b"content-disposition:"):
-                        disp = line.decode("utf-8", "replace")
-                        break
-                name_m = re.search(r'name="([^"]*)"', disp)
-                if not name_m:
-                    continue
-                field_name = name_m.group(1)
-                filename_m = re.search(r'filename="([^"]*)"', disp)
-                if filename_m:
-                    fields[field_name] = {"filename": filename_m.group(1), "content": content}
-                else:
-                    fields[field_name] = content.decode("utf-8", "replace")
-            return fields
-
-        def _handle_sync_upload(self):
-            ctype = self.headers.get("Content-Type") or ""
-            m = re.match(r'multipart/form-data;\s*boundary=(.+)', ctype)
-            if not m:
-                self._send_json({"error": "multipart/form-data (boundary付き) で送信してください"}, status=415)
-                return
-            boundary = m.group(1).strip().strip('"').encode("utf-8")
-            try:
-                length = int(self.headers.get("Content-Length", 0))
-            except ValueError:
-                self._send_json({"error": "Content-Length が不正です"}, status=400)
-                return
-            max_bytes = SyncAudioStore.MAX_FILE_BYTES + 1024 * 1024  # ファイル本体+フォームの余白分
-            if length <= 0 or length > max_bytes:
-                self._send_json(
-                    {"error": f"ファイルサイズが大きすぎます(上限 {SyncAudioStore.MAX_FILE_BYTES // (1024 * 1024)}MB)"},
-                    status=413,
-                )
-                return
-            body = self.rfile.read(length)
-            fields = self._parse_multipart(body, boundary)
-            file_field = fields.get("file")
-            if not isinstance(file_field, dict) or not file_field.get("content"):
-                self._send_json({"error": "file フィールドが必要です"}, status=400)
-                return
-            title = (fields.get("title") or "").strip() or os.path.splitext(file_field["filename"])[0]
-            ext = os.path.splitext(file_field["filename"])[1].lower()
-            if ext not in SyncAudioStore.ALLOWED_EXTS:
-                self._send_json(
-                    {"error": f"対応していない拡張子です ({', '.join(sorted(SyncAudioStore.ALLOWED_EXTS))})"},
-                    status=400,
-                )
-                return
-            linked_track_id = fields.get("linkedTrackId") or None
-            if isinstance(linked_track_id, str):
-                linked_track_id = linked_track_id.strip() or None
-            if linked_track_id and not any(t["id"] == linked_track_id for t in player.library):
-                self._send_json({"error": "linkedTrackId が本編ライブラリに見つかりません"}, status=400)
-                return
-            stored_filename = f"{uuid.uuid4().hex}{ext}"
-            file_path = os.path.join(SyncAudioStore.DIR, stored_filename)
-            try:
-                with open(file_path, "wb") as f:
-                    f.write(file_field["content"])
-            except OSError as e:
-                self._send_json({"error": f"保存に失敗しました: {e}"}, status=500)
-                return
-            entry = sync_store.add(stored_filename, title, linked_track_id)
-            self._send_json(entry, status=201)
-
         # 操作ロック中は拒否するエンドポイント (/lock/toggle自体はここに含めない。
         # 含めるとロック中に解除できなくなってしまうため)。
         LOCKABLE_PATHS = {
             "/command", "/seek",
             "/program/advance", "/program/back", "/program/reset", "/program/play-track",
-            "/sync/upload", "/sync/relink", "/sync/delete",
         }
 
         def _do_POST(self):
@@ -2121,35 +1948,6 @@ def make_now_playing_server(
                     else:
                         command_queue.put(f"PROGRAM_PLAY_TRACK:{track_id}")
                         self._send_json({"queued": "PROGRAM_PLAY_TRACK"}, status=202)
-            elif self.path == "/sync/upload":
-                self._handle_sync_upload()
-            elif self.path == "/sync/relink":
-                payload = self._read_json_body()
-                if payload is None:
-                    return
-                track_id = payload.get("trackId")
-                linked_track_id = payload.get("linkedTrackId") or None
-                if not track_id:
-                    self._send_json({"error": "trackId を指定してください"}, status=400)
-                    return
-                if linked_track_id and not any(t["id"] == linked_track_id for t in player.library):
-                    self._send_json({"error": "linkedTrackId が本編ライブラリに見つかりません"}, status=400)
-                    return
-                entry = sync_store.relink(track_id, linked_track_id)
-                if entry is None:
-                    self._send_json({"error": "trackId が見つかりません"}, status=400)
-                    return
-                self._send_json(entry)
-            elif self.path == "/sync/delete":
-                payload = self._read_json_body()
-                if payload is None:
-                    return
-                track_id = payload.get("trackId")
-                entry = sync_store.delete(track_id) if track_id else None
-                if not entry:
-                    self._send_json({"error": "trackId が見つかりません"}, status=400)
-                    return
-                self._send_json({"deleted": track_id})
             else:
                 self.send_response(404)
                 self.end_headers()

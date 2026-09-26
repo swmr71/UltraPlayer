@@ -285,36 +285,6 @@
     margin-top: 4px;
   }
 
-  #sync-card input[type="text"], #sync-card input[type="file"], #sync-card select {
-    padding: 6px 8px;
-    border-radius: 6px;
-    border: 1px solid rgba(255,255,255,0.15);
-    background: #14121f;
-    color: #fff;
-    font-size: 13px;
-  }
-  #sync-card input[type="file"] { flex: 1; }
-  #sync-card input[type="text"] { flex: 1; }
-  #sync-card select { flex: 1; min-width: 0; }
-  #sync-upload-btn {
-    width: 100%;
-    margin-top: 4px;
-    padding: 8px 14px;
-    border-radius: 8px;
-    border: 1px solid rgba(125,225,255,0.3);
-    background: rgba(125,225,255,0.1);
-    color: #7de1ff;
-    font-size: 13px;
-    cursor: pointer;
-  }
-  #sync-upload-btn:hover { background: rgba(125,225,255,0.2); }
-  #sync-upload-status { font-size: 11px; color: #666; margin-top: 4px; min-height: 1.4em; }
-  #sync-track-list { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
-  #sync-track-list .track-row { flex-direction: column; align-items: stretch; gap: 6px; cursor: default; }
-  #sync-track-list .track-row .name-line { display: flex; justify-content: space-between; align-items: center; }
-  #sync-track-list .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #sync-track-list .del-btn { background: transparent; border: none; color: #ff9d9d; font-size: 14px; cursor: pointer; padding: 2px 8px; }
-  #sync-track-list .empty { font-size: 12px; color: #666; }
 </style>
 </head>
 <body>
@@ -431,29 +401,11 @@
     </div>
 
     <h2 style="margin-top:28px;">🎧 スマホでイヤモニ (演者用)</h2>
-    <div class="monitor-card" id="sync-card">
-      <div class="field-row">
-        <input type="file" id="sync-file" accept="audio/*">
-      </div>
-      <div class="field-row">
-        <input type="text" id="sync-title" placeholder="タイトル(省略可)">
-      </div>
-      <div class="field-row">
-        <label for="sync-link-select" style="width:auto;">紐付けるBGM曲</label>
-        <select id="sync-link-select"></select>
-      </div>
-      <button id="sync-upload-btn">アップロード</button>
-      <div id="sync-upload-status"></div>
-
-      <div id="sync-track-list"></div>
-
-      <div class="save-hint">
-        演者用ページ: <span id="sync-phone-url"></span><br>
-        今流れているBGM: <span id="sync-follow-now">-</span> /
-        接続端末: <span id="sync-client-count">0</span>台<br>
-        ⚠ 本編の再生/一時停止/シーク/曲切り替えに自動追従します。紐付けが無い曲は
-        本編の音声(A)がそのままイヤモニに流れます。演者には必ず有線イヤホンを
-        使ってもらってください(Bluetoothは遅延が大きく同期がずれます)。
+    <div class="monitor-card">
+      <div class="save-hint" style="font-size:13px;">
+        音声のアップロード・BGM曲との紐付けは <b>bgm-library</b>(<span id="bgm-library-iem-link"></span>)の
+        「🎧 イヤモニ」タブから行います。<br><br>
+        演者用ページ: <span id="sync-phone-url"></span>
       </div>
     </div>
   </div>
@@ -673,7 +625,6 @@ async function poll() {
     renderProgram(data.program, player.playing);
     renderToggles(player);
     renderLock(player);
-    updateSyncLinkOptions(player.tracks || []);
   } catch (e) {
     connDot.classList.remove("ok");
     connText.textContent = "未接続 (main.py が起動しているか確認してください)";
@@ -881,152 +832,10 @@ pollCalib();
 setInterval(pollCalib, POLL_MS);
 
 // --- スマホでイヤモニ (演者用) ---
-const SYNC_LIBRARY_URL = "/sync/library";
-const SYNC_FOLLOW_URL = "/sync/follow";
-const SYNC_UPLOAD_URL = "/sync/upload";
-const SYNC_RELINK_URL = "/sync/relink";
-const SYNC_DELETE_URL = "/sync/delete";
-
-const syncFileInput = document.getElementById("sync-file");
-const syncTitleInput = document.getElementById("sync-title");
-const syncLinkSelect = document.getElementById("sync-link-select");
-const syncUploadBtn = document.getElementById("sync-upload-btn");
-const syncUploadStatus = document.getElementById("sync-upload-status");
-const syncTrackList = document.getElementById("sync-track-list");
-const syncClientCountEl = document.getElementById("sync-client-count");
-const syncFollowNowEl = document.getElementById("sync-follow-now");
-
+// 音声のアップロード・BGM曲との紐付け管理はbgm-library側に移した
+// (このページはmain.pyが配信するため、bgm-libraryとは別ポート(既定4000))。
 document.getElementById("sync-phone-url").textContent = `${location.origin}/sync.html`;
-
-let latestPlayerTracks = [];  // poll()側のNOW PLAYINGから常に最新化される本編ライブラリ
-let latestIemTracks = [];     // pollSyncLibrary()から最新化されるイヤモニ用ライブラリ
-
-function trackTitleById(trackId) {
-  const t = latestPlayerTracks.find(t => t.id === trackId);
-  return t ? t.title : null;
-}
-
-function syncLinkOptionsHtml(selectedId) {
-  const opts = ['<option value="">(紐付けなし: 本編と同じ音声を流す)</option>'];
-  for (const t of latestPlayerTracks) {
-    const sel = t.id === selectedId ? " selected" : "";
-    opts.push(`<option value="${escapeHtml(t.id)}"${sel}>${escapeHtml(t.title)}</option>`);
-  }
-  return opts.join("");
-}
-
-// アップロード用の紐付けセレクトは、本人が今まさに選んでいる最中に勝手に
-// 書き換えないよう、フォーカスが無いときだけ再構築する(他の入力欄と同じ流儀)。
-function updateSyncLinkOptions(tracks) {
-  latestPlayerTracks = tracks;
-  if (document.activeElement !== syncLinkSelect) {
-    const prev = syncLinkSelect.value;
-    syncLinkSelect.innerHTML = syncLinkOptionsHtml(null);
-    if (prev && latestPlayerTracks.some(t => t.id === prev)) syncLinkSelect.value = prev;
-  }
-  renderSyncTrackList(); // 曲名表示(trackTitleById)が最新化されるよう再描画
-}
-
-function renderSyncTrackList() {
-  const tracks = latestIemTracks;
-  if (!tracks.length) {
-    syncTrackList.innerHTML = `<div class="empty">まだ音声がアップロードされていません</div>`;
-    return;
-  }
-  syncTrackList.innerHTML = tracks.map(t => {
-    const linkedTitle = t.linkedTrackId ? trackTitleById(t.linkedTrackId) : null;
-    return `
-      <div class="track-row">
-        <div class="name-line">
-          <span class="name">🎧 ${escapeHtml(t.title)}</span>
-          <button class="del-btn" data-delete="${escapeHtml(t.id)}" title="削除">✕</button>
-        </div>
-        <select data-relink="${escapeHtml(t.id)}">${syncLinkOptionsHtml(t.linkedTrackId)}</select>
-        ${t.linkedTrackId && !linkedTitle ? '<span style="font-size:11px;color:#ff9d9d;">⚠ 紐付け先の曲が本編ライブラリから見つかりません</span>' : ""}
-      </div>`;
-  }).join("");
-  syncTrackList.querySelectorAll("[data-relink]").forEach(el => {
-    el.addEventListener("change", async () => {
-      try {
-        await fetch(SYNC_RELINK_URL, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ trackId: el.dataset.relink, linkedTrackId: el.value || null }),
-        });
-        pollSyncLibrary();
-      } catch (e) { /* 未接続時は次のpollで気付く */ }
-    });
-  });
-  syncTrackList.querySelectorAll("[data-delete]").forEach(el => {
-    el.addEventListener("click", async () => {
-      if (!confirm("この音声を削除しますか?")) return;
-      try {
-        await fetch(SYNC_DELETE_URL, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ trackId: el.dataset.delete }),
-        });
-        pollSyncLibrary();
-      } catch (e) { /* 未接続時は次のpollで気付く */ }
-    });
-  });
-}
-
-async function pollSyncLibrary() {
-  try {
-    const res = await fetch(SYNC_LIBRARY_URL, { cache: "no-store" });
-    if (!res.ok) return;
-    const data = await res.json();
-    latestIemTracks = data.tracks || [];
-    renderSyncTrackList();
-  } catch (e) { /* 未接続時は何もしない (上のNOW PLAYINGの接続表示に任せる) */ }
-}
-
-async function pollSyncFollow() {
-  try {
-    const res = await fetch(SYNC_FOLLOW_URL, { cache: "no-store" });
-    if (!res.ok) return;
-    const data = await res.json();
-    syncClientCountEl.textContent = typeof data.clientCount === "number" ? data.clientCount : 0;
-    if (!data.title) {
-      syncFollowNowEl.textContent = "-";
-    } else {
-      syncFollowNowEl.textContent = `${data.title}${data.usingFallback ? " (未紐付け)" : ""} → ${data.playing ? "再生中" : "一時停止中"}`;
-    }
-  } catch (e) { /* 未接続時は何もしない */ }
-}
-
-syncUploadBtn.addEventListener("click", async () => {
-  const file = syncFileInput.files[0];
-  if (!file) {
-    syncUploadStatus.textContent = "ファイルを選んでください";
-    return;
-  }
-  const form = new FormData();
-  form.append("file", file);
-  form.append("title", syncTitleInput.value.trim() || file.name);
-  if (syncLinkSelect.value) form.append("linkedTrackId", syncLinkSelect.value);
-  syncUploadStatus.textContent = "アップロード中...";
-  try {
-    const res = await fetch(SYNC_UPLOAD_URL, { method: "POST", body: form });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      syncUploadStatus.textContent = `失敗: ${err.error || res.status}`;
-      return;
-    }
-    syncUploadStatus.textContent = "アップロード完了";
-    syncFileInput.value = "";
-    syncTitleInput.value = "";
-    pollSyncLibrary();
-  } catch (e) {
-    syncUploadStatus.textContent = "アップロードに失敗しました(main.pyが起動しているか確認してください)";
-  }
-});
-
-pollSyncLibrary();
-pollSyncFollow();
-setInterval(pollSyncLibrary, 3000);
-setInterval(pollSyncFollow, POLL_MS);
+document.getElementById("bgm-library-iem-link").textContent = `http://${location.hostname}:4000`;
 </script>
 </body>
 </html>

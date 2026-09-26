@@ -230,8 +230,6 @@ tracks/*.wav
 tracks/*.ogg
 tracks/tracks.json
 tracks/playlists.json
+tracks/iem-audio.json
 program.json
 calib_state.json
-
-# スマホ同期再生用にアップロードされた音声本体と台帳 (本番ごとに変わるデータ)
-sync-audio/
