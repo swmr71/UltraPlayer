@@ -1483,11 +1483,16 @@ class CalibStore:
 
 
 class SyncAudioStore:
-    """スマホ同期再生用の音声ライブラリ管理 (sync-audio/manifest.json)。
+    """演者用イヤモニ(sync.html)の音声ライブラリ管理 (sync-audio/manifest.json)。
 
-    アップロードされた音声は sync-audio/<uuid>.<ext> に保存し、manifest.json に
-    {id, filename, title, addedAt} の配列として記録する。このうちどれを配信するかは
-    activeId で管理する (トラック切り替えUIから選択)。
+    アップロードされた音声(本編BGMの改造版などA')は sync-audio/<uuid>.<ext> に
+    保存し、manifest.json に {id, filename, title, linkedTrackId, addedAt} の
+    配列として記録する。linkedTrackId は「main.pyの再生ライブラリのどの曲(A)に
+    対応するか」を指すBGMトラックのid(tracks.json側のid)。本編でそのidの曲が
+    流れている間、対応するA'を自動でイヤモニに流す(sync.html側の追従ロジックは
+    /sync/follow を参照)。linkedTrackIdが無い(紐付けていない)エントリは
+    /sync/follow からは使われない(本編でそのA'を直接流す手段は無い。あくまで
+    「本編の曲Aの代わりに流す音声」としてのみ機能する)。
     """
 
     DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sync-audio")
@@ -1505,7 +1510,7 @@ class SyncAudioStore:
     def __init__(self):
         self.lock = threading.Lock()
         os.makedirs(self.DIR, exist_ok=True)
-        self.state = {"activeId": None, "tracks": []}
+        self.state = {"tracks": []}
         self._load()
 
     def _load(self):
@@ -1514,9 +1519,9 @@ class SyncAudioStore:
                 with open(self.MANIFEST_PATH, "r", encoding="utf-8") as f:
                     saved = json.load(f)
                 if isinstance(saved.get("tracks"), list):
+                    for t in saved["tracks"]:
+                        t.setdefault("linkedTrackId", None)
                     self.state["tracks"] = saved["tracks"]
-                if saved.get("activeId"):
-                    self.state["activeId"] = saved["activeId"]
             except Exception:
                 pass
 
@@ -1531,32 +1536,36 @@ class SyncAudioStore:
         with self.lock:
             return json.loads(json.dumps(self.state))
 
-    def get_active(self):
+    def find_by_linked_track(self, track_id):
+        if not track_id:
+            return None
         with self.lock:
-            active_id = self.state["activeId"]
             for t in self.state["tracks"]:
-                if t["id"] == active_id:
+                if t.get("linkedTrackId") == track_id:
                     return dict(t)
             return None
 
-    def add(self, filename, title):
+    def add(self, filename, title, linked_track_id):
         with self.lock:
-            entry = {"id": uuid.uuid4().hex, "filename": filename, "title": title, "addedAt": time.time()}
+            entry = {
+                "id": uuid.uuid4().hex,
+                "filename": filename,
+                "title": title,
+                "linkedTrackId": linked_track_id or None,
+                "addedAt": time.time(),
+            }
             self.state["tracks"].append(entry)
-            # 最初の1件は自動でactiveにする(毎回選び直す手間を省く)。2件目以降は
-            # 明示的に /sync/select で切り替えるまで今のactiveのまま。
-            if not self.state["activeId"]:
-                self.state["activeId"] = entry["id"]
             self._save()
             return dict(entry)
 
-    def select(self, track_id):
+    def relink(self, track_id, linked_track_id):
         with self.lock:
-            if not any(t["id"] == track_id for t in self.state["tracks"]):
-                return False
-            self.state["activeId"] = track_id
+            entry = next((t for t in self.state["tracks"] if t["id"] == track_id), None)
+            if entry is None:
+                return None
+            entry["linkedTrackId"] = linked_track_id or None
             self._save()
-            return True
+            return dict(entry)
 
     def delete(self, track_id):
         with self.lock:
@@ -1564,44 +1573,12 @@ class SyncAudioStore:
             if entry is None:
                 return None
             self.state["tracks"] = [t for t in self.state["tracks"] if t["id"] != track_id]
-            if self.state["activeId"] == track_id:
-                self.state["activeId"] = self.state["tracks"][0]["id"] if self.state["tracks"] else None
             self._save()
             try:
                 os.remove(os.path.join(self.DIR, entry["filename"]))
             except OSError:
                 pass
             return entry
-
-
-class SyncBroadcastState:
-    """スマホ同期再生の配信状態(配信中かどうか・開始予定時刻)を保持する。
-
-    play_epoch_ms はサーバーの time.time()*1000 基準で「いつ再生を開始するか」の
-    予定時刻。スマホ側は /sync/time で測定したサーバー時刻とのオフセットを使って
-    これを自分のAudioContextの時計に変換し、サンプル精度でスケジュール再生する
-    (詳細はsync.html参照)。再生対象の音声自体はSyncAudioStore側のactiveIdが
-    指す曲(トラック切り替え時はここもstop()して配信中断する)。
-    """
-
-    def __init__(self):
-        self.lock = threading.Lock()
-        self.active = False
-        self.play_epoch_ms = None
-
-    def start(self, lead_seconds: float):
-        with self.lock:
-            self.active = True
-            self.play_epoch_ms = time.time() * 1000 + lead_seconds * 1000
-
-    def stop(self):
-        with self.lock:
-            self.active = False
-            self.play_epoch_ms = None
-
-    def snapshot(self):
-        with self.lock:
-            return {"active": self.active, "playEpochMs": self.play_epoch_ms}
 
 
 # ------------------------------------------------------------
@@ -1628,7 +1605,6 @@ def make_now_playing_server(
 
     calib_store = CalibStore()
     sync_store = SyncAudioStore()
-    sync_broadcast = SyncBroadcastState()
     sync_clients: dict = {}  # cid -> 最終アクセス時刻。接続中スマホ台数の概算表示用
     sync_clients_lock = threading.Lock()
     VALID_COMMANDS = {
@@ -1746,18 +1722,26 @@ def make_now_playing_server(
                 # スマホ側のクロック同期(NTP風のオフセット測定)用。往復遅延の
                 # 誤差をできるだけ減らすため、他の処理を挟まず直前に時刻を取る。
                 self._send_json({"t": time.time() * 1000})
-            elif self.path.startswith("/sync/state"):
-                self._handle_sync_state()
+            elif self.path.startswith("/sync/follow"):
+                self._handle_sync_follow()
             elif self.path == "/sync/library":
                 self._send_json(sync_store.list())
             elif self.path.startswith("/sync/audio/"):
                 self._serve_sync_audio()
+            elif self.path.startswith("/sync/original-audio/"):
+                self._serve_sync_original_audio()
             elif self.path.startswith("/media/"):
                 self._serve_media()
             else:
                 self._serve_static()
 
-        def _handle_sync_state(self):
+        def _handle_sync_follow(self):
+            """演者用イヤモニ(sync.html)が今流すべき音声とその再生位置を返す。
+
+            本編(main.py)が今流している曲(BGMPlayer)をそのまま参照するため、
+            control.htmlの▶/⏸/⏭/シーク等どんな経路の操作でも自動的に反映される
+            (専用の「配信開始」操作は無い。本編の再生状態そのものがソース)。
+            """
             query = parse_qs(urlsplit(self.path).query)
             cid = (query.get("cid") or [None])[0]
             with sync_clients_lock:
@@ -1768,14 +1752,45 @@ def make_now_playing_server(
                 for k in stale:
                     del sync_clients[k]
                 client_count = len(sync_clients)
-            b = sync_broadcast.snapshot()
-            track = sync_store.get_active()
+
+            track = player.current_track()
+            if track is None:
+                self._send_json({
+                    "playing": False, "elapsedSec": 0, "asOfServerMs": time.time() * 1000,
+                    "trackId": None, "iemTrackId": None, "audioUrl": None, "title": None,
+                    "usingFallback": False, "clientCount": client_count,
+                })
+                return
+
+            playing = player.playing
+            elapsed = player.elapsed_sec()
+            as_of_server_ms = time.time() * 1000  # elapsed直後に取得し、計測のズレを最小化する
+
+            iem = sync_store.find_by_linked_track(track["id"])
+            if iem:
+                audio_url = f"/sync/audio/{iem['filename']}"
+                title = iem["title"]
+                using_fallback = False
+                iem_id = iem["id"]
+            else:
+                # 紐付けが無い曲は、本編と同じ音声(A)をそのままフォールバックで流す。
+                filename = os.path.basename(track["path"])
+                audio_url = f"/sync/original-audio/{filename}"
+                # 「未紐付け」等の注記はクライアント側(usingFallbackを見て)で付ける。
+                # ここでtitleに含めてしまうと各クライアントの表示と二重になる。
+                title = track["displayTitle"]
+                using_fallback = True
+                iem_id = None
+
             self._send_json({
-                "active": b["active"],
-                "playEpochMs": b["playEpochMs"],
-                "trackId": track["id"] if track else None,
-                "title": track["title"] if track else None,
-                "audioUrl": f"/sync/audio/{track['filename']}" if track else None,
+                "playing": playing,
+                "elapsedSec": round(elapsed, 3),
+                "asOfServerMs": as_of_server_ms,
+                "trackId": track["id"],
+                "iemTrackId": iem_id,
+                "audioUrl": audio_url,
+                "title": title,
+                "usingFallback": using_fallback,
                 "clientCount": client_count,
             })
 
@@ -1846,8 +1861,12 @@ def make_now_playing_server(
                 self.send_response(404)
                 self.end_headers()
                 return
+            self._send_file_with_range(file_path, self.MEDIA_CONTENT_TYPES[ext])
 
-            content_type = self.MEDIA_CONTENT_TYPES[ext]
+        # HTTP Rangeリクエストに対応したファイル配信の共通処理。動画(/media/)・
+        # イヤモニ用音声(/sync/audio/, /sync/original-audio/)のいずれも
+        # ファイルパスと存在チェックだけ済ませて渡せば同じロジックで配信できる。
+        def _send_file_with_range(self, file_path, content_type):
             file_size = os.path.getsize(file_path)
             start, end = 0, file_size - 1
             is_partial = False
@@ -1892,9 +1911,9 @@ def make_now_playing_server(
             except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
                 pass  # ブラウザがシーク等で途中の接続を切っただけ。エラー扱いにしない
 
-        # スマホ同期再生用の音声配信 (/sync/audio/<filename>)。iOS Safariの<audio>や
-        # fetch+decodeAudioDataでの先読みでもRangeリクエストが来ることがあるため、
-        # 動画と同じくRangeに対応する。ファイル名の検証は動画配信と同じ正規表現を使う。
+        # 演者用イヤモニ(sync.html)向けにアップロードされた音声の配信 (/sync/audio/<filename>)。
+        # iOS Safariの<audio>やfetch+decodeAudioDataでの先読みでもRangeリクエストが
+        # 来ることがあるため、動画と同じくRangeに対応する。
         def _serve_sync_audio(self):
             filename = os.path.basename(self.path.split("?", 1)[0])
             ext = os.path.splitext(filename)[1].lower()
@@ -1907,51 +1926,24 @@ def make_now_playing_server(
                 self.send_response(404)
                 self.end_headers()
                 return
+            self._send_file_with_range(file_path, SyncAudioStore.CONTENT_TYPES[ext])
 
-            content_type = SyncAudioStore.CONTENT_TYPES[ext]
-            file_size = os.path.getsize(file_path)
-            start, end = 0, file_size - 1
-            is_partial = False
-
-            range_header = self.headers.get("Range")
-            if range_header:
-                m = self.MEDIA_RANGE_RE.match(range_header)
-                if not m:
-                    self.send_response(416)
-                    self.send_header("Content-Range", f"bytes */{file_size}")
-                    self.end_headers()
-                    return
-                start_s, end_s = m.groups()
-                start = int(start_s) if start_s else 0
-                end = min(int(end_s), file_size - 1) if end_s else file_size - 1
-                if start > end or start >= file_size:
-                    self.send_response(416)
-                    self.send_header("Content-Range", f"bytes */{file_size}")
-                    self.end_headers()
-                    return
-                is_partial = True
-
-            length = end - start + 1
-            self.send_response(206 if is_partial else 200)
-            self.send_header("Content-Type", content_type)
-            self.send_header("Accept-Ranges", "bytes")
-            self.send_header("Content-Length", str(length))
-            if is_partial:
-                self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
-            self.end_headers()
-
-            try:
-                with open(file_path, "rb") as f:
-                    f.seek(start)
-                    remaining = length
-                    while remaining > 0:
-                        chunk = f.read(min(self.MEDIA_CHUNK_SIZE, remaining))
-                        if not chunk:
-                            break
-                        self.wfile.write(chunk)
-                        remaining -= len(chunk)
-            except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
-                pass
+        # イヤモニの紐付けが無い曲を、本編と同じ音声(A)のフォールバックとして
+        # イヤモニ側に配信する (/sync/original-audio/<filename>)。本編ライブラリの
+        # フォルダ(player.track_dir)からそのまま配信する。
+        def _serve_sync_original_audio(self):
+            filename = os.path.basename(self.path.split("?", 1)[0])
+            ext = os.path.splitext(filename)[1].lower()
+            if not self.MEDIA_FILENAME_RE.match(filename) or ext not in SyncAudioStore.CONTENT_TYPES:
+                self.send_response(404)
+                self.end_headers()
+                return
+            file_path = os.path.join(player.track_dir, filename)
+            if not os.path.isfile(file_path):
+                self.send_response(404)
+                self.end_headers()
+                return
+            self._send_file_with_range(file_path, SyncAudioStore.CONTENT_TYPES[ext])
 
         # スマホ同期再生の音声アップロード (multipart/form-data) を手書きでパースする。
         # cgi.FieldStorage は3.13で削除され、標準ライブラリに他の選択肢が無いため、
@@ -2016,6 +2008,12 @@ def make_now_playing_server(
                     status=400,
                 )
                 return
+            linked_track_id = fields.get("linkedTrackId") or None
+            if isinstance(linked_track_id, str):
+                linked_track_id = linked_track_id.strip() or None
+            if linked_track_id and not any(t["id"] == linked_track_id for t in player.library):
+                self._send_json({"error": "linkedTrackId が本編ライブラリに見つかりません"}, status=400)
+                return
             stored_filename = f"{uuid.uuid4().hex}{ext}"
             file_path = os.path.join(SyncAudioStore.DIR, stored_filename)
             try:
@@ -2024,7 +2022,7 @@ def make_now_playing_server(
             except OSError as e:
                 self._send_json({"error": f"保存に失敗しました: {e}"}, status=500)
                 return
-            entry = sync_store.add(stored_filename, title)
+            entry = sync_store.add(stored_filename, title, linked_track_id)
             self._send_json(entry, status=201)
 
         # 操作ロック中は拒否するエンドポイント (/lock/toggle自体はここに含めない。
@@ -2032,7 +2030,7 @@ def make_now_playing_server(
         LOCKABLE_PATHS = {
             "/command", "/seek",
             "/program/advance", "/program/back", "/program/reset", "/program/play-track",
-            "/sync/upload", "/sync/select", "/sync/delete", "/sync/start", "/sync/stop",
+            "/sync/upload", "/sync/relink", "/sync/delete",
         }
 
         def _do_POST(self):
@@ -2125,16 +2123,23 @@ def make_now_playing_server(
                         self._send_json({"queued": "PROGRAM_PLAY_TRACK"}, status=202)
             elif self.path == "/sync/upload":
                 self._handle_sync_upload()
-            elif self.path == "/sync/select":
+            elif self.path == "/sync/relink":
                 payload = self._read_json_body()
                 if payload is None:
                     return
                 track_id = payload.get("trackId")
-                if not track_id or not sync_store.select(track_id):
+                linked_track_id = payload.get("linkedTrackId") or None
+                if not track_id:
+                    self._send_json({"error": "trackId を指定してください"}, status=400)
+                    return
+                if linked_track_id and not any(t["id"] == linked_track_id for t in player.library):
+                    self._send_json({"error": "linkedTrackId が本編ライブラリに見つかりません"}, status=400)
+                    return
+                entry = sync_store.relink(track_id, linked_track_id)
+                if entry is None:
                     self._send_json({"error": "trackId が見つかりません"}, status=400)
                     return
-                sync_broadcast.stop()  # 曲を切り替えたら配信中の予定はいったん取り消す
-                self._send_json({"activeId": track_id})
+                self._send_json(entry)
             elif self.path == "/sync/delete":
                 payload = self._read_json_body()
                 if payload is None:
@@ -2144,27 +2149,7 @@ def make_now_playing_server(
                 if not entry:
                     self._send_json({"error": "trackId が見つかりません"}, status=400)
                     return
-                sync_broadcast.stop()
                 self._send_json({"deleted": track_id})
-            elif self.path == "/sync/start":
-                payload = self._read_json_body()
-                if payload is None:
-                    return
-                if sync_store.get_active() is None:
-                    self._send_json({"error": "配信する音声が選択されていません"}, status=400)
-                    return
-                try:
-                    lead_seconds = float(payload.get("leadSeconds", 3))
-                except (TypeError, ValueError):
-                    lead_seconds = 3.0
-                if not math.isfinite(lead_seconds):
-                    lead_seconds = 3.0
-                lead_seconds = max(1.0, min(30.0, lead_seconds))
-                sync_broadcast.start(lead_seconds)
-                self._send_json(sync_broadcast.snapshot())
-            elif self.path == "/sync/stop":
-                sync_broadcast.stop()
-                self._send_json(sync_broadcast.snapshot())
             else:
                 self.send_response(404)
                 self.end_headers()

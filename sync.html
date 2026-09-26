@@ -107,8 +107,9 @@
 <div id="enable-overlay">
   <h1>🎧 スマホでイヤモニ</h1>
   <p>
-    タップして待機を開始すると、本番開始の合図(操作者の「配信開始」)に合わせて
-    イヤホンからこの端末専用の音声が流れます。その後は一切操作不要です。
+    タップして待機を開始すると、今本編で流れているBGMに合わせて自動的に
+    イヤホンからこの端末専用の音声(イヤモニ用)が流れ始めます。以降は
+    本編側の再生/一時停止/曲送りに自動で追従するので操作は不要です。
     画面ロックはせず、イヤホンを挿した状態でお待ちください。
   </p>
   <p class="warn-note">
@@ -146,7 +147,11 @@
 "use strict";
 // main.py がこのページ自身も配信するため、相対パスで同じオリジンを指す
 const TIME_URL = "/sync/time";
-const STATE_URL = "/sync/state";
+const FOLLOW_URL = "/sync/follow";
+const POLL_MS = 700;
+// これ以上ズレたら(ネットワークジッタ等ではなく本当に本編と食い違ったと判断し)
+// 音声を止めて正しい位置から鳴らし直す(同期精度を最優先。小さなプチ音は許容)。
+const RESYNC_THRESHOLD_SEC = 0.02;
 
 const CLIENT_ID = (() => {
   try {
@@ -224,83 +229,67 @@ async function calibrateClock(rounds) {
 }
 
 // --- 音声の先読み・デコード ---
-let currentTrackId = null;
+// 「今どのURLを追いかけているか」を audioUrl 単位で管理する(本編の曲が
+// 切り替わればURLも変わるので、trackIdではなくaudioUrlの変化を見ればよい)。
+let loadedAudioUrl = null;
 let audioBuffer = null;
-let loadingTrackId = null;
+let loadingAudioUrl = null;
 
-async function ensureAudioLoaded(track) {
-  if (!track || !track.audioUrl) return;
-  if (track.trackId === currentTrackId && audioBuffer) return;
-  if (loadingTrackId === track.trackId) return;
-  loadingTrackId = track.trackId;
-  setStatus("waiting", "🎵", "音声を準備中...", track.title || "");
+async function ensureAudioLoaded(audioUrl) {
+  if (!audioUrl) return;
+  if (audioUrl === loadedAudioUrl && audioBuffer) return;
+  if (loadingAudioUrl === audioUrl) return;
+  loadingAudioUrl = audioUrl;
   try {
-    const res = await fetch(track.audioUrl, { cache: "force-cache" });
+    const res = await fetch(audioUrl, { cache: "force-cache" });
     const arrBuf = await res.arrayBuffer();
     const decoded = await audioCtx.decodeAudioData(arrBuf);
     audioBuffer = decoded;
-    currentTrackId = track.trackId;
+    loadedAudioUrl = audioUrl;
   } catch (e) {
     audioBuffer = null;
-    currentTrackId = null;
+    loadedAudioUrl = null;
   } finally {
-    if (loadingTrackId === track.trackId) loadingTrackId = null;
+    if (loadingAudioUrl === audioUrl) loadingAudioUrl = null;
   }
 }
 
-// --- 再生スケジューリング ---
-let scheduledForEpoch = null;
+// --- 再生位置の追従 ---
+// activeSource が鳴っている間、その開始時点の (ctxTime, bufferOffset) を覚えておき、
+// 「今のはずの再生位置」と突き合わせて大きくズレたら鳴らし直す(ハード再同期)。
 let activeSource = null;
+let sourceStartCtxTime = null;   // このsourceをstart()したときの audioCtx.currentTime
+let sourceStartOffset = null;    // そのときバッファのどこから鳴らし始めたか(秒)
 
 function stopActiveSource() {
   if (activeSource) {
     try { activeSource.stop(); } catch (e) { /* 既に止まっている */ }
     activeSource = null;
   }
+  sourceStartCtxTime = null;
+  sourceStartOffset = null;
 }
 
-function scheduleFrom(playEpochMs) {
-  if (!audioBuffer || offsetMs == null) return;
-  if (scheduledForEpoch === playEpochMs) return; // 同じ開始指示は1回しかスケジュールしない
-  scheduledForEpoch = playEpochMs;
+function startSourceAt(offsetSec) {
   stopActiveSource();
-
-  // サーバー時刻での開始予定 → このAudioContextの時計(currentTime)に変換する。
-  // performance.now()とAudioContext.currentTimeは同じ単調クロックに基づくため、
-  // 「今」の両者の値を同時にサンプリングすれば、そのままオフセットとして使える。
-  const perfNow = performance.now();
+  if (!audioBuffer) return;
+  const duration = audioBuffer.duration;
+  let offset = offsetSec % duration; // 本編側がループしても追いつけるよう周期的に丸める
+  if (offset < 0) offset = 0;
   const ctxNow = audioCtx.currentTime;
-  const localEpochAtCtxNow = performance.timeOrigin + perfNow;
-  const localTargetEpoch = playEpochMs - offsetMs; // サーバー時刻→ローカル時刻
-  const deltaSec = (localTargetEpoch - localEpochAtCtxNow) / 1000;
-  let when = ctxNow + deltaSec;
-  let bufferOffset = 0;
-
-  if (when < ctxNow) {
-    // 既に開始予定時刻を過ぎている(接続復帰直後など)。曲の途中から追いつく。
-    bufferOffset = ctxNow - when;
-    if (bufferOffset >= audioBuffer.duration) {
-      // 曲の長さより遅れている場合はすぐに頭から鳴らす(無音より復帰優先)
-      bufferOffset = 0;
-    }
-    when = ctxNow + 0.03;
-  }
-
+  const startAt = ctxNow + 0.03; // 発音までのごく短い猶予(0未満のstartを避けるため)
   const source = audioCtx.createBufferSource();
   source.buffer = audioBuffer;
   source.connect(gainNode);
-  source.start(when, bufferOffset);
+  source.start(startAt, offset + 0.03);
   activeSource = source;
+  sourceStartCtxTime = startAt;
+  sourceStartOffset = offset + 0.03;
+}
 
-  const leadMs = (when - ctxNow) * 1000;
-  if (leadMs > 50) {
-    setStatus("armed", "🕒", "再生予定あり", `あと約 ${(leadMs / 1000).toFixed(1)} 秒`);
-    setTimeout(() => {
-      if (activeSource === source) setStatus("playing", "🔊", "再生中", "");
-    }, Math.max(0, leadMs));
-  } else {
-    setStatus("playing", "🔊", "再生中", "");
-  }
+function currentSourcePositionSec() {
+  if (!activeSource || sourceStartCtxTime == null) return null;
+  return sourceStartOffset + (audioCtx.currentTime - sourceStartCtxTime);
 }
 
 function setStatus(mode, icon, text, sub) {
@@ -310,13 +299,11 @@ function setStatus(mode, icon, text, sub) {
   statusSub.textContent = sub;
 }
 
-// --- 配信状態のポーリング ---
-let lastTrackId = null;
-
-async function pollState() {
+// --- 本編の再生状態を継続的にポーリングして追従する ---
+async function pollFollow() {
   let res;
   try {
-    res = await fetch(`${STATE_URL}?cid=${encodeURIComponent(CLIENT_ID)}`, { cache: "no-store" });
+    res = await fetch(`${FOLLOW_URL}?cid=${encodeURIComponent(CLIENT_ID)}`, { cache: "no-store" });
   } catch (e) {
     connDot.classList.remove("ok");
     connText.textContent = "未接続";
@@ -331,32 +318,52 @@ async function pollState() {
   connText.textContent = "接続中";
   const data = await res.json();
   diagClients.textContent = typeof data.clientCount === "number" ? `${data.clientCount}台` : "-";
-  trackTitleEl.textContent = data.title ? `🎵 ${data.title}` : "";
 
-  if (data.trackId && data.trackId !== lastTrackId) {
-    lastTrackId = data.trackId;
-    scheduledForEpoch = null;
-    await ensureAudioLoaded(data);
-    if (!data.active) {
-      setStatus("waiting", "✅", "待機中", "準備完了。開始を待っています");
-    }
+  if (!data.audioUrl) {
+    stopActiveSource();
+    audioBuffer = null;
+    loadedAudioUrl = null;
+    trackTitleEl.textContent = "";
+    setStatus("waiting", "⏳", "待機中", "本編に曲がロードされていません");
+    return;
   }
 
-  if (data.active && data.playEpochMs) {
-    if (!audioBuffer && data.trackId) {
-      await ensureAudioLoaded(data);
+  trackTitleEl.textContent = `${data.usingFallback ? "🔁 " : "🎵 "}${data.title}`;
+
+  if (data.audioUrl !== loadedAudioUrl) {
+    // 曲が切り替わった。読み込み終わるまでは前の音を止めておく(誤った曲が鳴り続けるのを防ぐ)
+    stopActiveSource();
+    setStatus("waiting", "🎵", "音声を準備中...", data.title || "");
+    await ensureAudioLoaded(data.audioUrl);
+    if (audioBuffer == null) {
+      setStatus("waiting", "⚠", "音声の読み込みに失敗", "");
+      return;
     }
-    scheduleFrom(data.playEpochMs);
+  }
+  if (offsetMs == null || !audioBuffer) return; // クロック同期・音声のどちらかがまだ準備できていない
+
+  // サーバーが計測した時点(asOfServerMs)から今までに経過したぶんを足して、
+  // 「サーバー視点で“今”のはずの再生位置」を推定する。
+  const serverNowEstimate = localEpochNow() + offsetMs;
+  const elapsedSincePollSec = Math.max(0, (serverNowEstimate - data.asOfServerMs) / 1000);
+  const expectedSec = data.playing ? data.elapsedSec + elapsedSincePollSec : data.elapsedSec;
+
+  if (!data.playing) {
+    if (activeSource) stopActiveSource();
+    setStatus("armed", "⏸", "一時停止中(本編に追従)", data.usingFallback ? "紐付けなし: 本編と同じ音声" : "");
+    return;
+  }
+
+  if (!activeSource) {
+    startSourceAt(expectedSec);
   } else {
-    if (scheduledForEpoch !== null) {
-      // 停止指示。今すぐ止める
-      stopActiveSource();
-      scheduledForEpoch = null;
-      setStatus("waiting", "✅", "待機中", audioBuffer ? "準備完了。開始を待っています" : "");
-    } else if (!audioBuffer) {
-      setStatus("waiting", "⏳", "待機中", "配信音声の設定を待っています");
+    const actualSec = currentSourcePositionSec();
+    const driftSec = actualSec == null ? Infinity : Math.abs(expectedSec - actualSec);
+    if (driftSec > RESYNC_THRESHOLD_SEC) {
+      startSourceAt(expectedSec); // ズレが大きいので鳴らし直す(小さなプチ音より同期精度を優先)
     }
   }
+  setStatus("playing", "🔊", "再生中(本編に追従)", data.usingFallback ? "紐付けなし: 本編と同じ音声" : "");
 }
 
 // --- 音量 ---
@@ -376,7 +383,14 @@ async function requestWakeLock() {
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") {
     requestWakeLock();
-    if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
+    // 画面ロック等でAudioContextが一時停止していると currentTime が止まって
+    // いた間ズレが蓄積しているはずなので、resume() 後すぐにポーリングし直して
+    // 大きなドリフトを検知させ、ハード再同期させる。
+    if (audioCtx && audioCtx.state === "suspended") {
+      audioCtx.resume().then(pollFollow);
+    } else {
+      pollFollow();
+    }
   }
 });
 
@@ -396,9 +410,9 @@ enableBtn.addEventListener("click", async () => {
   setStatus("waiting", "📡", "同期を測定中...", "サーバーとの時刻合わせをしています");
   await calibrateClock(15);
 
-  pollState();
-  setInterval(pollState, 1000);
-  setInterval(sampleClockOffset, 4000); // 再生開始後も常時オフセットを更新し続ける(次回の開始精度向上のため)
+  pollFollow();
+  setInterval(pollFollow, POLL_MS);
+  setInterval(sampleClockOffset, 4000); // 開始後も常時オフセットを更新し続ける(ズレ検知の精度向上のため)
 }, { once: true });
 </script>
 </body>

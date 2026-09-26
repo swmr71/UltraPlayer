@@ -61,7 +61,7 @@
   <h2>演者用</h2>
   <a class="card" href="sync.html">
     <div class="name">sync.html - スマホでイヤモニ</div>
-    <div class="desc">タップして待機するだけで、control.htmlの「配信開始」に合わせて全端末が(ほぼ)同時に音声を再生。有線イヤホン推奨</div>
+    <div class="desc">タップするだけで、本編BGMに紐付けた改造音声を再生位置ごと自動追従。有線イヤホン推奨</div>
   </a>
 
   <h2>配信用 (OBSのBrowser Sourceに追加)</h2>
@@ -84,8 +84,8 @@
     <div><b>POST</b> /program/advance - 次第を次の演目へ進める</div>
     <div><b>POST</b> /program/back - 直前の進行を1つ取り消す</div>
     <div><b>GET/POST</b> /calib - 配信画面のキャリブレーション状態</div>
-    <div><b>GET</b> /sync/time, /sync/state, /sync/library - スマホ同期再生の時刻同期・配信状態・音声一覧</div>
-    <div><b>POST</b> /sync/upload, /sync/select, /sync/delete, /sync/start, /sync/stop - スマホ同期再生の操作(control.htmlから)</div>
+    <div><b>GET</b> /sync/time, /sync/follow, /sync/library - スマホでイヤモニの時刻同期・追従状態・音声一覧</div>
+    <div><b>POST</b> /sync/upload, /sync/relink, /sync/delete - スマホでイヤモニの音声管理(control.htmlから)</div>
   </div>
 
   <p class="note">
