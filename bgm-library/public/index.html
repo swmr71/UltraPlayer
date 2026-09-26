@@ -37,6 +37,12 @@
   .playlist-preview { margin-top: 6px; font-size: 12px; color: #9fd6a8; }
   .playlist-preview.empty { color: #888; }
   .playlist-picker-label { display: block; font-size: 11px; color: #888; margin-top: 10px; letter-spacing: 0.02em; }
+  .program-item-insert-btn {
+    display: block; width: 100%; box-sizing: border-box;
+    margin-top: 14px; padding: 6px;
+    background: transparent; border: 1px dashed #4f7cff; color: #7de1ff; font-size: 12px;
+  }
+  .program-item-insert-btn:hover { background: rgba(79,124,255,0.1); }
   .program-section { margin-top: 14px; }
   .program-section-header {
     display: flex; align-items: center; gap: 8px;
@@ -1100,12 +1106,19 @@ function renderProgramItemRow(item, i, playlistById, libraryById) {
       </label>
       <label class="playlist-picker-label">上演中に流す動画 (この演目の間ずっと)</label>
       ${renderVideoPicker(item, i, "performingVideoId", "performingVideoSide", "performingVideoMuted", "performingVideoSyncPlayback")}
+      <button class="program-item-insert-btn" data-insert-after="${i}" type="button">+ この下に演目を追加</button>
     </div>
     <button class="secondary" data-up="${i}" type="button">↑</button>
     <button class="secondary" data-down="${i}" type="button">↓</button>
     <button class="danger" data-remove="${i}" type="button">演目削除</button>
   `;
   return row;
+}
+
+// 追加直後の演目名欄にフォーカスして、そのまま入力を始められるようにする。
+function focusProgramItemName(idx) {
+  const el = document.querySelector(`#program-list input[data-idx="${idx}"][data-field="name"]`);
+  if (el) el.focus();
 }
 
 function renderProgram() {
@@ -1196,6 +1209,7 @@ function renderProgram() {
         performingPlaylistId: null, performingTrackId: null, performingAutoplay: false,
       });
       renderProgram();
+      focusProgramItemName(lastIdx + 1);
     });
   });
   container.querySelectorAll("select[data-playlist-field]").forEach(el => {
@@ -1232,6 +1246,21 @@ function renderProgram() {
   container.querySelectorAll("button[data-remove]").forEach(btn => {
     btn.addEventListener("click", () => { program.splice(Number(btn.dataset.remove), 1); renderProgram(); });
   });
+  // 各演目タイルの下に置いた「+この下に演目を追加」。一番下の「演目を追加」ボタンだと
+  // 常に全体の最後尾に追加されて、目的の位置まで↑で動かす手間があったため、
+  // 見ている場所にそのまま挿入できるようにした(セクション内ならそのセクションを継承)。
+  container.querySelectorAll("button[data-insert-after]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const idx = Number(btn.dataset.insertAfter);
+      const section = (program[idx].section || "").trim();
+      program.splice(idx + 1, 0, {
+        name: "", section, playlistId: null, trackId: null,
+        performingPlaylistId: null, performingTrackId: null, performingAutoplay: false,
+      });
+      renderProgram();
+      focusProgramItemName(idx + 1);
+    });
+  });
   container.querySelectorAll("button[data-up]").forEach(btn => {
     btn.addEventListener("click", () => {
       const i = Number(btn.dataset.up);
@@ -1249,6 +1278,7 @@ function renderProgram() {
 document.getElementById("btn-add-item").addEventListener("click", () => {
   program.push({ name: "", section: "", playlistId: null, trackId: null, performingPlaylistId: null, performingTrackId: null, performingAutoplay: false });
   renderProgram();
+  focusProgramItemName(program.length - 1);
 });
 
 document.getElementById("btn-save-program").addEventListener("click", async () => {
