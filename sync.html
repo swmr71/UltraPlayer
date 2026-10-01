@@ -215,6 +215,13 @@ async function sampleClockOffset() {
     offsetMs = estOffset;
   } else if (offsetMs == null) {
     offsetMs = estOffset; // 初回はRTTが悪くても無いよりはまし
+  } else {
+    // 採用されなかったサンプルごとに「最良RTT」の基準を少しずつ緩める。
+    // 緩めないと、開始直後にたまたま出た最小RTTを永久に更新できず、オフセットが
+    // 開始時点の値で固まってしまう。端末とサーバーの時計は微妙にずれていく
+    // (数十ppmでも1時間で百ms前後)ので、長い本番の途中で同期がじわじわ狂う。
+    // 緩めて新しいサンプルが採用されれば、その後はまたRTTの小さいものだけが採用される。
+    bestRttMs = bestRttMs * 1.1 + 0.1;
   }
   diagOffset.textContent = offsetMs != null ? `${offsetMs.toFixed(1)}ms` : "-";
   diagRtt.textContent = `${bestRttMs === Infinity ? rtt.toFixed(1) : bestRttMs.toFixed(1)}ms`;
@@ -234,24 +241,45 @@ async function calibrateClock(rounds) {
 let loadedAudioUrl = null;
 let audioBuffer = null;
 let loadingAudioUrl = null;
+let loadingPromise = null;
 
-async function ensureAudioLoaded(audioUrl) {
-  if (!audioUrl) return;
-  if (audioUrl === loadedAudioUrl && audioBuffer) return;
-  if (loadingAudioUrl === audioUrl) return;
+// audioUrl の音声を読み込んでデコードする。完了(または失敗)で解決するPromiseを返す。
+// 読み込み中に同じURLで再度呼ばれたら、そのPromiseをそのまま返す(ポーリングは700msごとで、
+// モバイル回線だと読み込みに数秒かかるので、この間に何度も呼ばれる)。
+function ensureAudioLoaded(audioUrl) {
+  if (!audioUrl) return Promise.resolve();
+  if (audioUrl === loadedAudioUrl && audioBuffer) return Promise.resolve();
+  if (loadingAudioUrl === audioUrl && loadingPromise) return loadingPromise;
+
+  // 別の曲へ切り替わる。前の曲のバッファは必ず捨てる。残しておくと、読み込み完了を
+  // 待たずに続きの処理へ進んだポーリングが「前の曲の音声」を新しい曲の位置から
+  // 鳴らしてしまい、演者のイヤモニに違う曲が流れる。
+  audioBuffer = null;
+  loadedAudioUrl = null;
   loadingAudioUrl = audioUrl;
-  try {
-    const res = await fetch(audioUrl, { cache: "force-cache" });
-    const arrBuf = await res.arrayBuffer();
-    const decoded = await audioCtx.decodeAudioData(arrBuf);
-    audioBuffer = decoded;
-    loadedAudioUrl = audioUrl;
-  } catch (e) {
-    audioBuffer = null;
-    loadedAudioUrl = null;
-  } finally {
-    if (loadingAudioUrl === audioUrl) loadingAudioUrl = null;
-  }
+  const promise = (async () => {
+    try {
+      const res = await fetch(audioUrl, { cache: "force-cache" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const arrBuf = await res.arrayBuffer();
+      const decoded = await audioCtx.decodeAudioData(arrBuf);
+      if (loadingAudioUrl !== audioUrl) return; // 読み込み中にさらに別の曲へ切り替わった。この結果は捨てる
+      audioBuffer = decoded;
+      loadedAudioUrl = audioUrl;
+    } catch (e) {
+      if (loadingAudioUrl === audioUrl) {
+        audioBuffer = null;
+        loadedAudioUrl = null;
+      }
+    } finally {
+      if (loadingAudioUrl === audioUrl) {
+        loadingAudioUrl = null;
+        loadingPromise = null;
+      }
+    }
+  })();
+  loadingPromise = promise;
+  return promise;
 }
 
 // --- 再生位置の追従 ---
@@ -300,29 +328,34 @@ function setStatus(mode, icon, text, sub) {
 }
 
 // --- 本編の再生状態を継続的にポーリングして追従する ---
+let pollSeq = 0;
 async function pollFollow() {
+  // 「タップして待機を開始」の前(AudioContext未作成)に、画面の表示切り替え
+  // (visibilitychange)から呼ばれることがある。この状態で進むと音声のデコードに
+  // 失敗して「読み込みに失敗」と出てしまうので何もしない。
+  if (!audioCtx) return;
+  const seq = ++pollSeq;
   let res;
+  let data;
   try {
     res = await fetch(`${FOLLOW_URL}?cid=${encodeURIComponent(CLIENT_ID)}`, { cache: "no-store" });
+    if (!res.ok) throw new Error("bad status");
+    data = await res.json();
   } catch (e) {
-    connDot.classList.remove("ok");
-    connText.textContent = "未接続";
-    return;
-  }
-  if (!res.ok) {
     connDot.classList.remove("ok");
     connText.textContent = "未接続";
     return;
   }
   connDot.classList.add("ok");
   connText.textContent = "接続中";
-  const data = await res.json();
   diagClients.textContent = typeof data.clientCount === "number" ? `${data.clientCount}台` : "-";
 
   if (!data.audioUrl) {
     stopActiveSource();
     audioBuffer = null;
     loadedAudioUrl = null;
+    loadingAudioUrl = null; // 読み込み中の曲があっても、その結果は使わない
+    loadingPromise = null;
     trackTitleEl.textContent = "";
     setStatus("waiting", "⏳", "待機中", "本編に曲がロードされていません");
     return;
@@ -335,7 +368,10 @@ async function pollFollow() {
     stopActiveSource();
     setStatus("waiting", "🎵", "音声を準備中...", data.title || "");
     await ensureAudioLoaded(data.audioUrl);
-    if (audioBuffer == null) {
+    // 読み込み中にこのポーリングより新しいポーリングが走っていたら、そちらの
+    // (より新しい本編の状態に基づく)結果に任せる。古いdataで鳴らし始めない。
+    if (seq !== pollSeq) return;
+    if (loadedAudioUrl !== data.audioUrl || audioBuffer == null) {
       setStatus("waiting", "⚠", "音声の読み込みに失敗", "");
       return;
     }

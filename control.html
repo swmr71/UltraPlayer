@@ -724,6 +724,9 @@ programResetBtn.addEventListener("click", async () => {
 // control.html を操作の中心にしてる場合はキーが「効かない」状態になっていた。
 document.addEventListener("keydown", (e) => {
   if (e.ctrlKey || e.altKey || e.metaKey) return;
+  // キーを押しっぱなしにするとkeydownが連続で発火する。演目が何個も一気に進んで
+  // しまう(転換BGMが飛ばされる)ので、押し続けた分は無視して1回の押下を1回の操作にする。
+  if (e.repeat) return;
   if (document.body.classList.contains("locked")) return;  // 操作ロック中はN/Bも効かない
   const tag = (e.target && e.target.tagName) || "";
   if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
