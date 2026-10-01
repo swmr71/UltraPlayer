@@ -59,7 +59,6 @@ from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit, parse_qs
 
-import pygame
 from PIL import Image, ImageDraw, ImageFont
 
 # cv2 / mediapipe / numpy はカメラ(--hand-sign)専用で、特にmediapipeの import
@@ -343,6 +342,225 @@ class VoiceController:
 DEFAULT_FADE_MS = 400
 
 
+def _kill_process_tree(proc: "subprocess.Popen | None", label: str = "子プロセス"):
+    """プロセスをその子プロセスごと終了させる (taskkill /T または killpg)。
+
+    proc.terminate() は対象プロセス自身しか止めないため、そのプロセスがさらに
+    起動した孫プロセスが孤児として残ってしまうケースがある
+    (bgm-libraryのyt-dlp/demucs、再生子プロセスのハング時など)。
+    """
+    if proc is None or proc.poll() is not None:
+        return
+    if sys.platform == "win32":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                capture_output=True, timeout=10,
+            )
+        except Exception as e:
+            print(f"[警告] {label}のプロセスツリーを終了できませんでした: {e}")
+            proc.terminate()
+    else:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except Exception:
+            proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+class PlayerEngineError(RuntimeError):
+    """再生子プロセスとの通信・実行が失敗したときに送出される。
+
+    呼び出し側(BGMPlayer)は、これまで pygame の生の例外を捕まえていた箇所で
+    そのまま catch できるよう、Exception のサブクラスにしてある。
+    """
+
+
+class PlayerEngine:
+    """pygame.mixer.music の呼び出しを、別プロセス(player_worker.py)へ委譲する
+    プロキシ。ネイティブ層(SDL_mixer)がクラッシュ/ハングしても、この呼び出しが
+    タイムアウト/失敗するだけで本体プロセス(HTTPサーバー・カメラ入力)は
+    道連れにならない。
+
+    バックグラウンドのウォッチドッグ(_watchdog_loop)が定期的に生存確認し、
+    プロセスが死んでいる/応答しない場合は自動的に再起動する。再起動後は
+    on_restart コールバック(BGMPlayer側が差し込む)で直前の再生状態
+    (曲・位置・音量)を新しいプロセスへ再現する。
+
+    再生系の操作(command_queueの処理)はmain.py側でもともと単一スレッド
+    (メインループ)からしか呼ばれない設計になっているが、ウォッチドッグの
+    ハートビートは別スレッドから呼ぶため、ロックで直列化している。
+
+    メインループ(get_busy等)とウォッチドッグ(ping)の両方が、同じ1回の
+    クラッシュを検知してほぼ同時に再起動しようとすることがある。後から
+    ロックを取った側がそのまま再起動すると、先に直した側の再起動(と
+    直後の状態復元)を台無しにしてしまうため、_generation (再起動のたびに
+    増えるカウンタ) を見て「自分が検知した時点より後に既に直っていたら
+    何もしない」ようにしている。
+    """
+
+    CALL_TIMEOUT = 2.0
+    HEARTBEAT_SEC = 2.0
+    _WORKER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "player_worker.py")
+
+    def __init__(self):
+        self._lock = threading.RLock()
+        self._proc: subprocess.Popen | None = None
+        self._next_id = 0
+        self._on_restart = None
+        self._generation = 0
+        self._restart_count = 0
+        self._restart_window_start = time.monotonic()
+        self._stopping = False
+        self._start()
+        self._watchdog_thread = threading.Thread(target=self._watchdog_loop, daemon=True)
+        self._watchdog_thread.start()
+
+    def set_on_restart(self, callback):
+        """再生プロセスが再起動された直後に呼ばれるコールバックを登録する
+        (状態復元用。ロックを保持したまま呼ばれるので、この中で再度
+        self.call(...) を呼んでも(RLockのため)デッドロックはしない)。"""
+        self._on_restart = callback
+
+    def _start(self):
+        popen_kwargs = {} if sys.platform == "win32" else {"start_new_session": True}
+        self._proc = subprocess.Popen(
+            [sys.executable, self._WORKER_PATH],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            text=True, bufsize=1,
+            **popen_kwargs,
+        )
+        try:
+            self._raw_call({"cmd": "init"}, timeout=10.0)
+        except PlayerEngineError as e:
+            _kill_process_tree(self._proc, label="再生プロセス")
+            self._proc = None
+            raise RuntimeError(
+                "音声デバイスを初期化できませんでした。デバイスが接続されているか、"
+                f"他のアプリが排他モードで占有していないか確認してください ({e})"
+            ) from e
+        self._generation += 1
+
+    def _raw_call(self, payload: dict, timeout: float) -> dict:
+        proc = self._proc
+        if proc is None or proc.poll() is not None:
+            raise PlayerEngineError("再生プロセスが起動していません")
+        self._next_id += 1
+        payload = dict(payload, id=self._next_id)
+        try:
+            proc.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            proc.stdin.flush()
+        except Exception as e:
+            raise PlayerEngineError(f"再生プロセスへの送信に失敗しました: {e}") from e
+
+        result_box = {}
+
+        def _read():
+            try:
+                result_box["line"] = proc.stdout.readline()
+            except Exception as e:
+                result_box["error"] = e
+
+        reader = threading.Thread(target=_read, daemon=True)
+        reader.start()
+        reader.join(timeout)
+        if reader.is_alive():
+            raise PlayerEngineError("再生プロセスの応答がタイムアウトしました (ハングしている可能性があります)")
+        if "error" in result_box:
+            raise PlayerEngineError(f"再生プロセスからの読み取りに失敗しました: {result_box['error']}")
+        line = result_box.get("line")
+        if not line:
+            raise PlayerEngineError("再生プロセスが応答なく終了しました")
+        try:
+            resp = json.loads(line)
+        except json.JSONDecodeError as e:
+            raise PlayerEngineError(f"再生プロセスの応答を解釈できませんでした: {e}") from e
+        if resp.get("id") != payload["id"]:
+            raise PlayerEngineError("再生プロセスの応答が想定と異なりました (同期ずれ)")
+        if not resp.get("ok"):
+            raise PlayerEngineError(resp.get("error") or "不明なエラー")
+        return resp
+
+    def call(self, cmd: str, timeout: float | None = None, **kwargs) -> dict:
+        """コマンドを送って応答を待つ。失敗した場合は再生プロセスを再起動した上で
+        PlayerEngineError を送出する(呼び出し元は従来pygameの例外をcatchしていた
+        箇所でそのままcatchできる)。"""
+        with self._lock:
+            generation = self._generation
+            try:
+                return self._raw_call({"cmd": cmd, **kwargs}, timeout or self.CALL_TIMEOUT)
+            except PlayerEngineError as e:
+                print(f"[警告] 再生プロセスとの通信に失敗しました ({cmd}): {e}")
+                if not self._stopping:
+                    self._restart(generation)
+                raise
+
+    def _restart(self, failed_generation: int):
+        with self._lock:
+            if failed_generation != self._generation:
+                # 別スレッド(メインループ or ウォッチドッグ)が、自分がこの失敗に
+                # 気づいた後に既に再起動・状態復元を済ませていた。二重に
+                # 再起動すると、せっかく復元した状態をまた消してしまうので
+                # 何もしない。
+                return
+            _kill_process_tree(self._proc, label="再生プロセス")
+            self._proc = None
+            now = time.monotonic()
+            if now - self._restart_window_start > 30:
+                self._restart_window_start = now
+                self._restart_count = 0
+            self._restart_count += 1
+            if self._restart_count > 1:
+                backoff = min(5.0, 0.5 * self._restart_count)
+                print(f"[警告] 再生プロセスを再起動します ({self._restart_count}回目、{backoff:.1f}秒待機)")
+                time.sleep(backoff)
+            else:
+                print("[警告] 再生プロセスを再起動します")
+            try:
+                self._start()
+            except Exception as e:
+                print(f"[エラー] 再生プロセスの再起動に失敗しました: {e}")
+                return
+            print("[INFO] 再生プロセスを再起動しました")
+            if self._on_restart:
+                try:
+                    self._on_restart()
+                except Exception as e:
+                    print(f"[警告] 再生状態の復元に失敗しました: {e}")
+
+    def _watchdog_loop(self):
+        while not self._stopping:
+            time.sleep(self.HEARTBEAT_SEC)
+            if self._stopping:
+                return
+            with self._lock:
+                proc = self._proc
+                generation = self._generation
+            if proc is not None and proc.poll() is not None:
+                print(f"[警告] 再生プロセスが終了していました (code={proc.poll()})")
+                self._restart(generation)
+                continue
+            try:
+                self.call("ping", timeout=3.0)
+            except PlayerEngineError:
+                pass  # call()内で既に再起動処理済み
+
+    def shutdown(self):
+        self._stopping = True
+        with self._lock:
+            proc = self._proc
+            if proc is not None and proc.poll() is None:
+                try:
+                    self._raw_call({"cmd": "quit"}, timeout=2.0)
+                except Exception:
+                    pass
+            _kill_process_tree(proc, label="再生プロセス")
+            self._proc = None
+
+
 # ------------------------------------------------------------
 # BGMプレイヤー本体
 # ------------------------------------------------------------
@@ -356,16 +574,12 @@ class BGMPlayer:
     """
 
     def __init__(self, track_dir: str):
-        # 音声デバイス未接続・他アプリの排他占有・リモートデスクトップ接続中などで
-        # 失敗する。pygameの生の例外のままだと原因が分かりにくいので、
-        # 呼び出し側(main)がそのまま表示できるメッセージに包み直す。
-        try:
-            pygame.mixer.init()
-        except Exception as e:
-            raise RuntimeError(
-                "音声デバイスを初期化できませんでした。デバイスが接続されているか、"
-                f"他のアプリが排他モードで占有していないか確認してください ({e})"
-            ) from e
+        # 実際の音声デバイス初期化・再生は別プロセス(player_worker.py)側で行う
+        # (native層のクラッシュ/ハングからメインプロセスを守るため)。
+        # PlayerEngine() のコンストラクタ内で失敗した場合、既にここで表示できる
+        # メッセージに包んだ RuntimeError を送出してくれる。
+        self.engine = PlayerEngine()
+        self.engine.set_on_restart(self._resync_engine)
         self.track_dir = track_dir
         self.library = self._load_library(track_dir)
         if not self.library:
@@ -491,7 +705,7 @@ class BGMPlayer:
         本番中にこの1曲のせいでアプリ全体が落ちるのを防ぐため。
         """
         try:
-            pygame.mixer.music.load(self.library[self.index]["path"])
+            self.engine.call("load", path=self.library[self.index]["path"])
             return True
         except Exception as e:
             path = self.library[self.index]["path"]
@@ -507,7 +721,7 @@ class BGMPlayer:
         ⏭/⏮ でプロセスごと落ちる経路になっていた。
         """
         try:
-            pygame.mixer.music.play(fade_ms=fade_ms)
+            self.engine.call("play", fade_ms=fade_ms)
             return True
         except Exception as e:
             print(f"[警告] 再生を開始できませんでした: {e}")
@@ -563,7 +777,7 @@ class BGMPlayer:
         if duration:
             seconds = min(seconds, max(0.0, duration - 0.5))
         try:
-            pygame.mixer.music.set_pos(seconds)
+            self.engine.call("set_pos", seconds=seconds)
         except Exception as e:
             print(f"[警告] シークに失敗しました (このファイル形式では非対応の可能性があります): {e}")
             return
@@ -593,7 +807,7 @@ class BGMPlayer:
             return
         if self.playing:
             try:
-                pygame.mixer.music.pause()
+                self.engine.call("pause")
             except Exception as e:
                 print(f"[警告] 一時停止に失敗しました: {e}")
             # pause()が失敗しても状態は「停止した」に倒す。実際に鳴り続けていても
@@ -606,9 +820,9 @@ class BGMPlayer:
         else:
             try:
                 if self._paused_mid_playback:
-                    pygame.mixer.music.unpause()
+                    self.engine.call("unpause")
                 else:
-                    pygame.mixer.music.play()
+                    self.engine.call("play")
                     self._elapsed_base = 0.0
                 self.playing = True
                 self.paused = False
@@ -625,7 +839,7 @@ class BGMPlayer:
         (次第の転換先にBGMが無い=無音になる場合に使う)。"""
         self._fadeout_current(fade_ms)
         try:
-            pygame.mixer.music.stop()
+            self.engine.call("stop")
         except Exception as e:
             print(f"[警告] 停止に失敗しました: {e}")
         self.playing = False
@@ -633,6 +847,17 @@ class BGMPlayer:
         self._paused_mid_playback = False
         self._elapsed_base = 0.0
         self._elapsed_started_at = None
+
+    def is_busy(self) -> bool:
+        """曲が実際に鳴っているか(pygame.mixer.music.get_busy()相当)。
+        再生子プロセスと通信できない間は「鳴っているかどうか分からない」だけで
+        あり、無音扱いにすると誤って次の曲へ進んだりリピートが暴走したりする
+        ため、失敗時は安全側(鳴っていることにする=何もしない)に倒す。
+        """
+        try:
+            return bool(self.engine.call("get_busy")["busy"])
+        except Exception:
+            return True
 
     def tick(self):
         """毎フレーム呼ぶ想定。曲が自然に終了したときの後処理を行う
@@ -642,11 +867,11 @@ class BGMPlayer:
         """
         if not self.playing:
             return
-        if pygame.mixer.music.get_busy():
+        if self.is_busy():
             return
         if self.repeat:
             try:
-                pygame.mixer.music.play()
+                self.engine.call("play")
                 self._elapsed_base = 0.0
                 self._elapsed_started_at = time.monotonic()
             except Exception as e:
@@ -687,7 +912,7 @@ class BGMPlayer:
         if not self.playing:
             return  # 一時停止中/未再生(既に無音)ならフェードアウトの必要は無い
         try:
-            pygame.mixer.music.fadeout(fade_ms)
+            self.engine.call("fadeout", fade_ms=fade_ms)
         except Exception as e:
             # フェードできなくても曲の切り替え自体は続行する (無音のまま切り替わるだけ)
             print(f"[警告] フェードアウトに失敗しました: {e}")
@@ -728,7 +953,7 @@ class BGMPlayer:
 
     def _apply_volume(self):
         try:
-            pygame.mixer.music.set_volume(self.volume)
+            self.engine.call("set_volume", volume=self.volume)
         except Exception as e:
             print(f"[警告] 音量の変更に失敗しました: {e}")
 
@@ -782,6 +1007,36 @@ class BGMPlayer:
                 self._elapsed_started_at = None
                 return True
         return False
+
+    def _resync_engine(self):
+        """再生子プロセスがクラッシュ/ハングして再起動された直後、PlayerEngine
+        から呼ばれる。直前の再生状態(曲・位置・音量)をこちら側(BGMPlayer)は
+        既に保持しているので、それを新しい子プロセスへ再現する。
+
+        本番中に無音のまま完全に止まってしまうよりは、多少の位置ズレ
+        (再起動にかかった一瞬の空白)があっても再生を継続する方を優先する。
+        """
+        try:
+            self.engine.call("set_volume", volume=self.volume)
+        except Exception as e:
+            print(f"[警告] 再生状態の復元(音量)に失敗しました: {e}")
+        track = self.current_track()
+        if track is None:
+            return
+        try:
+            self.engine.call("load", path=track["path"])
+        except Exception as e:
+            print(f"[警告] 再生状態の復元(曲の再読み込み)に失敗しました: {e}")
+            return
+        if not (self.playing or (self.paused and self._paused_mid_playback)):
+            return  # 停止中、または未再生のままロードだけしていた曲なら、頭出しのみで良い
+        try:
+            self.engine.call("play")
+            self.engine.call("set_pos", seconds=self.elapsed_sec())
+            if not self.playing:
+                self.engine.call("pause")
+        except Exception as e:
+            print(f"[警告] 再生状態の復元(再生位置)に失敗しました: {e}")
 
 
 # ------------------------------------------------------------
@@ -1284,7 +1539,7 @@ class ProgramController:
             return
         if self.player.paused:
             return
-        if pygame.mixer.music.get_busy():
+        if self.player.is_busy():
             return
         fade_ms = self.fade_ms_for_current()
         if self.player.repeat:
@@ -1528,6 +1783,7 @@ def make_now_playing_server(
     port: int,
     program: "ProgramController" = None,
     command_queue: "queue.Queue[str]" = None,
+    program_advance_pending: "threading.Event | None" = None,
 ) -> ThreadingHTTPServer:
     """GET /now-playing で現在状態、GET/POST /calib でキャリブレーション状態を扱うHTTPサーバーを作る
 
@@ -1540,6 +1796,11 @@ def make_now_playing_server(
     実際の再生操作はメインループ側のスレッドでまとめて処理するため、
     ここではキューに積むだけにして pygame の呼び出しをスレッド間で
     競合させないようにしている。
+
+    program_advance_pending が指定されている場合、/program/advance の連打を
+    デバウンスする(前回のPROGRAM_NEXTがまだ処理中の間は新規に積まない)。
+    「次へ」ボタンの連打で転換演出が何演目分も一気に進んでしまったり、
+    フェード処理をコマンド分だけ連続で積んでしまったりするのを防ぐ。
     """
 
     calib_store = CalibStore()
@@ -1920,7 +2181,12 @@ def make_now_playing_server(
             elif self.path == "/program/advance":
                 if program is None or command_queue is None:
                     self._send_json({"error": "program not enabled (--program を指定してください)"}, status=400)
+                elif program_advance_pending is not None and program_advance_pending.is_set():
+                    # 直前のPROGRAM_NEXTがまだ処理中(フェード待ち等)。連打分は積まずに無視する。
+                    self._send_json({"queued": "PROGRAM_NEXT", "debounced": True}, status=202)
                 else:
+                    if program_advance_pending is not None:
+                        program_advance_pending.set()
                     command_queue.put("PROGRAM_NEXT")
                     self._send_json({"queued": "PROGRAM_NEXT"}, status=202)
             elif self.path == "/program/back":
@@ -2058,26 +2324,7 @@ def stop_bgm_library(proc):
     proc.terminate() は node 本体しか止めないため、server.js が起動した
     yt-dlp / demucs (Python) が孤児として残り、GPU/CPUを掴んだまま走り続ける。
     """
-    if proc is None or proc.poll() is not None:
-        return
-    if sys.platform == "win32":
-        try:
-            subprocess.run(
-                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                capture_output=True, timeout=10,
-            )
-        except Exception as e:
-            print(f"[警告] bgm-library のプロセスツリーを終了できませんでした: {e}")
-            proc.terminate()
-    else:
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        except Exception:
-            proc.terminate()
-    try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        proc.kill()
+    _kill_process_tree(proc, label="bgm-library")
 
 
 def apply_command(player: "BGMPlayer", command: str, prefix: str = "", program: "ProgramController" = None) -> str:
@@ -2170,6 +2417,7 @@ def main():
     _mark("次第ファイル読み込み")
 
     command_queue: "queue.Queue[str]" = queue.Queue()
+    program_advance_pending = threading.Event()
     voice_controller = None
     if args.voice:
         try:
@@ -2185,13 +2433,17 @@ def main():
     api_thread = None
     if args.api_port:
         try:
-            api_server = make_now_playing_server(player, args.api_port, program, command_queue)
+            api_server = make_now_playing_server(
+                player, args.api_port, program, command_queue, program_advance_pending
+            )
         except OSError as e:
             print(f"[警告] ポート{args.api_port}が使用中です。既存プロセスを終了して再試行します ({e})")
             if free_port(args.api_port):
                 time.sleep(0.5)
                 try:
-                    api_server = make_now_playing_server(player, args.api_port, program, command_queue)
+                    api_server = make_now_playing_server(
+                        player, args.api_port, program, command_queue, program_advance_pending
+                    )
                 except OSError as e2:
                     print(f"[エラー] 再試行しても起動できませんでした: {e2}")
             else:
@@ -2210,8 +2462,11 @@ def main():
         while not command_queue.empty():
             queued_command = command_queue.get_nowait()
             if queued_command == "PROGRAM_NEXT":
-                if program:
-                    status_text = program.advance()
+                try:
+                    if program:
+                        status_text = program.advance()
+                finally:
+                    program_advance_pending.clear()
             elif queued_command == "PROGRAM_BACK":
                 if program:
                     status_text = program.back()
@@ -2361,7 +2616,7 @@ def main():
         # 例外・sys.exit・Ctrl+C のいずれで抜けても必ず後片付けする。
         # 1つが失敗しても残りを続けたいので個別に保護する。
         for label, cleanup in (
-            ("音声デバイス", pygame.mixer.quit),
+            ("再生プロセス", player.engine.shutdown),
             ("音声認識", voice_controller.stop if voice_controller else None),
             ("APIサーバー", api_server.shutdown if api_server else None),
             ("bgm-library", (lambda: stop_bgm_library(bgm_library_proc))),
