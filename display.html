@@ -48,6 +48,17 @@
     margin-top: 1vh;
   }
   #track-sub:empty { display: none; }
+  /* 転換中だけ出す「Next: 次の演目名」 */
+  #next-item {
+    font-size: 5.5vw;
+    font-weight: 700;
+    text-align: center;
+    line-height: 1.3;
+    max-width: 94%;
+    margin-top: 4vh;
+    color: #fff;
+  }
+  #next-item:empty { display: none; }
 
   #conn-error {
     position: fixed;
@@ -79,6 +90,7 @@
   <div id="status-badge">STOPPED</div>
   <div id="track-name">-</div>
   <div id="track-sub"></div>
+  <div id="next-item"></div>
 </div>
 <video id="video-el" playsinline></video>
 <div id="conn-error">接続待機中... (main.py が起動しているか確認してください)</div>
@@ -91,6 +103,7 @@ const appEl = document.getElementById("app");
 const statusBadge = document.getElementById("status-badge");
 const trackName = document.getElementById("track-name");
 const trackSub = document.getElementById("track-sub");
+const nextItem = document.getElementById("next-item");
 const connError = document.getElementById("conn-error");
 const videoEl = document.getElementById("video-el");
 let lastVideoUrl = null;
@@ -325,6 +338,7 @@ async function poll() {
     trackName.textContent = info.title ?? "";
     trackName.style.color = info.titleColor || "";
     trackSub.textContent = info.sub || "";
+    nextItem.textContent = data.mode === "transition" && data.next_item ? `Next: ${data.next_item}` : "";
     statusBadge.textContent = info.statusText;
     statusBadge.style.visibility = info.hideBadge ? "hidden" : "visible";
     appEl.classList.toggle("paused", !info.playing);
