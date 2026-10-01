@@ -43,6 +43,7 @@ Webカメラでハンドサインを認識してBGMを操作するプレイヤ�
 """
 
 import argparse
+import copy
 import os
 import time
 import glob
@@ -257,6 +258,22 @@ class VoiceController:
         (["音量下げ", "ボリューム下げ", "下げる", "小さく"], "VOL_DOWN"),
     ]
 
+    # Voskに渡す文法(語彙制約)。文法の各語はモデルの語彙にある単語でなければ
+    # ならず、無い語は黙って捨てられる。「音量上げ」「ボリューム下げ」のような
+    # 複合語はこのモデルの語彙に無く、KEYWORD_MAP の語をそのまま文法にすると
+    # 「音量上げて」「音量下げて」が [unk] 扱いになって一切認識されなかった。
+    # そのため語彙にある単語に空白で分けて渡す (認識結果は空白を除いてから
+    # KEYWORD_MAP と突き合わせるので、「音量 上げて」→「音量上げて」でマッチする)。
+    GRAMMAR_PHRASES = [
+        "一時停止", "止めて", "ポーズ",
+        "再生", "プレイ",
+        "停止", "ストップ",
+        "次", "スキップ",
+        "前", "戻って",
+        "音量 上げて", "音量 上げ", "ボリューム 上げて", "ボリューム 上げ", "上げる", "大きく",
+        "音量 下げて", "音量 下げ", "ボリューム 下げて", "ボリューム 下げ", "下げる", "小さく",
+    ]
+
     def __init__(self, command_queue: "queue.Queue[str]"):
         self.command_queue = command_queue
         self._stop_flag = threading.Event()
@@ -279,9 +296,16 @@ class VoiceController:
 
         self.model = vosk.Model(self.MODEL_DIR)
 
+        # KEYWORD_MAP にキーワードを足したのに GRAMMAR_PHRASES へ足し忘れると、
+        # そのキーワードは文法に無く認識されない。気づけるよう起動時に確認する。
+        grammar_text = [p.replace(" ", "") for p in self.GRAMMAR_PHRASES]
+        for keywords, command in self.KEYWORD_MAP:
+            for k in keywords:
+                if not any(k in g for g in grammar_text):
+                    print(f"[警告] 音声コマンド「{k}」({command}) は GRAMMAR_PHRASES に無いため認識されません")
+
         # 認識対象の単語だけに絞ったグラマーを作る (語彙制約で誤認識を減らす)
-        grammar_words = sorted({w for keywords, _ in self.KEYWORD_MAP for w in keywords})
-        grammar_words.append("[unk]")
+        grammar_words = list(self.GRAMMAR_PHRASES) + ["[unk]"]
         self.recognizer = vosk.KaldiRecognizer(self.model, self.SAMPLE_RATE, json.dumps(grammar_words, ensure_ascii=False))
 
     def _match_command(self, text: str):
@@ -379,6 +403,17 @@ class PlayerEngineError(RuntimeError):
     """
 
 
+class PlayerCommandError(PlayerEngineError):
+    """再生子プロセスは正常に応答したが、コマンド自体が失敗したときに送出される
+    (壊れた音源・未対応の形式・シーク非対応など、pygameが普通に投げる例外)。
+
+    プロセスの異常(クラッシュ/ハング/通信断)ではないので、PlayerEngine は
+    この場合に再生プロセスを再起動しない。再起動してしまうと、壊れた1曲を
+    読み込むたびに再起動 → 状態復元で同じ曲を再ロード → また失敗 → …と
+    連鎖して、メインループが何分も固まる。
+    """
+
+
 class PlayerEngine:
     """pygame.mixer.music の呼び出しを、別プロセス(player_worker.py)へ委譲する
     プロキシ。ネイティブ層(SDL_mixer)がクラッシュ/ハングしても、この呼び出しが
@@ -404,6 +439,10 @@ class PlayerEngine:
 
     CALL_TIMEOUT = 2.0
     HEARTBEAT_SEC = 2.0
+    # ファイルを開く/先頭から読み進めるコマンドは、遅いディスクや長い曲だと
+    # 通常の応答より時間がかかりうる。2秒で「ハング」と判定して再起動すると
+    # かえって音が途切れるので、これらだけは長めに待つ。
+    COMMAND_TIMEOUTS = {"load": 8.0, "set_pos": 8.0}
     _WORKER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "player_worker.py")
 
     def __init__(self):
@@ -414,6 +453,8 @@ class PlayerEngine:
         self._generation = 0
         self._restart_count = 0
         self._restart_window_start = time.monotonic()
+        self._last_restart_at = None  # 直近の再起動を試みた時刻 (再起動の間隔を空けるため)
+        self._restoring = False  # on_restart(状態復元)の実行中か。復元中の失敗で再起動を入れ子にしないために使う
         self._stopping = False
         self._start()
         self._watchdog_thread = threading.Thread(target=self._watchdog_loop, daemon=True)
@@ -427,10 +468,12 @@ class PlayerEngine:
 
     def _start(self):
         popen_kwargs = {} if sys.platform == "win32" else {"start_new_session": True}
+        # 通信は ensure_ascii のJSON(ASCIIのみ)で行うのでロケールには依存しないが、
+        # 念のため文字コードも明示しておく (日本語Windowsの既定はcp932)。
         self._proc = subprocess.Popen(
             [sys.executable, self._WORKER_PATH],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            text=True, bufsize=1,
+            text=True, encoding="utf-8", bufsize=1,
             **popen_kwargs,
         )
         try:
@@ -451,7 +494,10 @@ class PlayerEngine:
         self._next_id += 1
         payload = dict(payload, id=self._next_id)
         try:
-            proc.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            # ensure_ascii=True (既定) にして、曲のパスに日本語等が含まれていても
+            # 両プロセスのロケールが食い違う/表現できない文字があるケースで
+            # 送受信に失敗しないようにする。
+            proc.stdin.write(json.dumps(payload) + "\n")
             proc.stdin.flush()
         except Exception as e:
             raise PlayerEngineError(f"再生プロセスへの送信に失敗しました: {e}") from e
@@ -481,25 +527,55 @@ class PlayerEngine:
         if resp.get("id") != payload["id"]:
             raise PlayerEngineError("再生プロセスの応答が想定と異なりました (同期ずれ)")
         if not resp.get("ok"):
-            raise PlayerEngineError(resp.get("error") or "不明なエラー")
+            error = resp.get("error") or "不明なエラー"
+            if resp.get("fatal"):
+                # ミキサー自体が使えなくなっている(デバイス喪失等)。このプロセスは
+                # 再起動して初期化し直さない限り二度と鳴らせないので、通信障害と同じ扱い。
+                raise PlayerEngineError(error)
+            raise PlayerCommandError(error)
         return resp
 
     def call(self, cmd: str, timeout: float | None = None, **kwargs) -> dict:
-        """コマンドを送って応答を待つ。失敗した場合は再生プロセスを再起動した上で
-        PlayerEngineError を送出する(呼び出し元は従来pygameの例外をcatchしていた
-        箇所でそのままcatchできる)。"""
+        """コマンドを送って応答を待つ。
+
+        再生プロセスの異常(ハング/クラッシュ/通信断)のときは、再生プロセスを
+        再起動した上で PlayerEngineError を送出する。コマンド自体の失敗
+        (壊れた音源など)は PlayerCommandError (PlayerEngineErrorのサブクラス)を
+        送出するだけで再起動はしない。呼び出し元は従来pygameの例外をcatchして
+        いた箇所でそのままcatchできる。"""
         with self._lock:
             generation = self._generation
+            was_alive = self._proc is not None
             try:
-                return self._raw_call({"cmd": cmd, **kwargs}, timeout or self.CALL_TIMEOUT)
+                return self._raw_call(
+                    {"cmd": cmd, **kwargs}, timeout or self.COMMAND_TIMEOUTS.get(cmd, self.CALL_TIMEOUT)
+                )
+            except PlayerCommandError:
+                raise  # プロセスは健在。壊れた音源などの通常のエラーなので再起動しない
             except PlayerEngineError as e:
-                print(f"[警告] 再生プロセスとの通信に失敗しました ({cmd}): {e}")
-                if not self._stopping:
+                # 再起動待ちで既にプロセスが居ない間は、メインループが毎回呼ぶたびに
+                # 警告を出し続けて画面を埋めてしまうので、最初の1回だけ出す。
+                if was_alive:
+                    print(f"[警告] 再生プロセスとの通信に失敗しました ({cmd}): {e}")
+                # 状態復元中の失敗は再起動しない (復元が壊れた曲を再生しようとして
+                # 失敗するたびに再起動を入れ子にすると、いつまでも終わらなくなる。
+                # 本当にプロセスが死んでいればウォッチドッグが次の周期で再起動する)
+                if not self._stopping and not self._restoring:
                     self._restart(generation)
                 raise
 
+    @staticmethod
+    def _restart_interval(restart_count: int) -> float:
+        """直近のウィンドウ内で restart_count 回再起動した後、次の再起動までに最低限空ける秒数。
+        1回目の再起動(最初の失敗)は待たずに即座に直す。"""
+        if restart_count <= 0:
+            return 0.0
+        return min(5.0, 0.5 * (restart_count + 1))
+
     def _restart(self, failed_generation: int):
         with self._lock:
+            if self._stopping:
+                return  # 終了処理中に、ウォッチドッグが再生プロセスを立て直してしまわないように
             if failed_generation != self._generation:
                 # 別スレッド(メインループ or ウォッチドッグ)が、自分がこの失敗に
                 # 気づいた後に既に再起動・状態復元を済ませていた。二重に
@@ -512,13 +588,16 @@ class PlayerEngine:
             if now - self._restart_window_start > 30:
                 self._restart_window_start = now
                 self._restart_count = 0
+            if self._last_restart_at is not None and \
+                    now - self._last_restart_at < self._restart_interval(self._restart_count):
+                # 立て続けに壊れている。ここで sleep すると、ロックを握ったまま
+                # メインループ全体を止めてしまう(音声デバイスが外れている間は毎フレーム
+                # 数秒ずつ固まる)。何もせず戻り、ウォッチドッグが間隔を空けて再試行する。
+                # それまでの呼び出しは「プロセスが起動していません」で即座に失敗する。
+                return
             self._restart_count += 1
-            if self._restart_count > 1:
-                backoff = min(5.0, 0.5 * self._restart_count)
-                print(f"[警告] 再生プロセスを再起動します ({self._restart_count}回目、{backoff:.1f}秒待機)")
-                time.sleep(backoff)
-            else:
-                print("[警告] 再生プロセスを再起動します")
+            self._last_restart_at = now
+            print(f"[警告] 再生プロセスを再起動します ({self._restart_count}回目)")
             try:
                 self._start()
             except Exception as e:
@@ -526,10 +605,13 @@ class PlayerEngine:
                 return
             print("[INFO] 再生プロセスを再起動しました")
             if self._on_restart:
+                self._restoring = True
                 try:
                     self._on_restart()
                 except Exception as e:
                     print(f"[警告] 再生状態の復元に失敗しました: {e}")
+                finally:
+                    self._restoring = False
 
     def _watchdog_loop(self):
         while not self._stopping:
@@ -539,7 +621,11 @@ class PlayerEngine:
             with self._lock:
                 proc = self._proc
                 generation = self._generation
-            if proc is not None and proc.poll() is not None:
+            if proc is None:
+                # 再起動に失敗した/間隔待ちでまだ立ち上がっていない。ここで再試行する。
+                self._restart(generation)
+                continue
+            if proc.poll() is not None:
                 print(f"[警告] 再生プロセスが終了していました (code={proc.poll()})")
                 self._restart(generation)
                 continue
@@ -579,6 +665,7 @@ class BGMPlayer:
         # PlayerEngine() のコンストラクタ内で失敗した場合、既にここで表示できる
         # メッセージに包んだ RuntimeError を送出してくれる。
         self.engine = PlayerEngine()
+        self._unrestorable_paths = set()  # _resync_engine を参照
         self.engine.set_on_restart(self._resync_engine)
         self.track_dir = track_dir
         self.library = self._load_library(track_dir)
@@ -1015,6 +1102,12 @@ class BGMPlayer:
 
         本番中に無音のまま完全に止まってしまうよりは、多少の位置ズレ
         (再起動にかかった一瞬の空白)があっても再生を継続する方を優先する。
+
+        ただし、復元でこの曲を読み込む/再生した直後に再生プロセスがまた落ちる
+        (曲自体が原因でネイティブ層がクラッシュする)場合、そのまま復元を
+        繰り返すと「再起動 → 復元 → クラッシュ」の無限ループになる。そのため
+        一度復元に失敗した曲は _unrestorable_paths に覚え、次からは復元せず
+        停止状態にして止める。
         """
         try:
             self.engine.call("set_volume", volume=self.volume)
@@ -1023,10 +1116,22 @@ class BGMPlayer:
         track = self.current_track()
         if track is None:
             return
+        path = track["path"]
+        if path in self._unrestorable_paths:
+            print(f"[警告] この曲の再生状態は復元せず停止状態にします (復元中に再生プロセスが落ちた曲): {path}")
+            self._mark_stopped()
+            return
         try:
-            self.engine.call("load", path=track["path"])
-        except Exception as e:
+            self.engine.call("load", path=path)
+        except PlayerCommandError as e:
+            # プロセスは無事で、曲が読めないだけ。再起動のきっかけにはならない。
             print(f"[警告] 再生状態の復元(曲の再読み込み)に失敗しました: {e}")
+            self._mark_stopped()
+            return
+        except Exception as e:
+            self._unrestorable_paths.add(path)
+            print(f"[警告] 再生状態の復元(曲の再読み込み)に失敗しました: {e}")
+            self._mark_stopped()
             return
         if not (self.playing or (self.paused and self._paused_mid_playback)):
             return  # 停止中、または未再生のままロードだけしていた曲なら、頭出しのみで良い
@@ -1035,8 +1140,21 @@ class BGMPlayer:
             self.engine.call("set_pos", seconds=self.elapsed_sec())
             if not self.playing:
                 self.engine.call("pause")
-        except Exception as e:
+        except PlayerCommandError as e:
+            # 例: この形式はシーク非対応。曲の頭から鳴っているだけなので継続する。
             print(f"[警告] 再生状態の復元(再生位置)に失敗しました: {e}")
+        except Exception as e:
+            self._unrestorable_paths.add(path)
+            print(f"[警告] 再生状態の復元(再生位置)に失敗しました: {e}")
+            self._mark_stopped()
+
+    def _mark_stopped(self):
+        """再生状態の復元を諦めたとき、こちら側の状態を実際の無音と一致させる。"""
+        self.playing = False
+        self.paused = True
+        self._paused_mid_playback = False
+        self._elapsed_base = 0.0
+        self._elapsed_started_at = None
 
 
 # ------------------------------------------------------------
@@ -1339,6 +1457,28 @@ class ProgramController:
         self.active_playlist_loops = snap.get("active_playlist_loops", True)
         self.playlist_positions = snap["playlist_positions"]
 
+    def _sync_bgm_pos(self):
+        """bgm_pos を、BGMPlayer が実際に読み込んでいる曲に合わせる。
+
+        ⏭/⏮ (apply_command → BGMPlayer.next_track/prev_track) は ProgramController を
+        経由せずに曲を切り替えるため、そのままだと bgm_pos が古いまま残る。すると
+        曲が自然に終わったとき「古い bgm_pos の次」へ進んでしまい、⏭ で聞いている曲が
+        もう一度流れたり、⏭を重ねたあと逆戻りしたりする(戻るときの再開位置も狂う)。
+        プレイリスト外の曲(制限解除中の⏭/⏮)なら対応する位置が無いので何もしない。
+        """
+        if not self.bgm_queue:
+            return
+        track = self.player.current_track()
+        if not track:
+            return
+        queue = self.bgm_queue
+        if 0 <= self.bgm_pos < len(queue) and queue[self.bgm_pos] == track["id"]:
+            return
+        # 同じ曲が複数回入っているプレイリストでは、今の位置に一番近いものを選ぶ
+        candidates = [i for i, tid in enumerate(queue) if tid == track["id"]]
+        if candidates:
+            self.bgm_pos = min(candidates, key=lambda i: abs(i - self.bgm_pos))
+
     def _record_resume_position(self):
         """今流しているプレイリストの再開位置を記録する
         (次に同じプレイリストを使うときは続きの曲から)。"""
@@ -1430,6 +1570,7 @@ class ProgramController:
         (転換用プレイリストが割り当てられてなければ無音の転換になる。
         BGMの有無に関わらず、必ず転換中を経てからもう一度Nで上演開始する)。
         """
+        self._sync_bgm_pos()
         if not self.started:
             snap = self._snapshot()
             self.started = True
@@ -1537,6 +1678,7 @@ class ProgramController:
         """
         if not self.bgm_queue:
             return
+        self._sync_bgm_pos()
         if self.player.paused:
             return
         if self.player.is_busy():
@@ -1676,7 +1818,10 @@ class CalibStore:
 
     def __init__(self):
         self.lock = threading.Lock()
-        self.state = dict(self.DEFAULT)
+        # dict(self.DEFAULT) は浅いコピーで、内側の {"heightCm", "yOffsetPx"} 辞書を
+        # クラス変数 DEFAULT と共有してしまい、update() で DEFAULT 自体を書き換えて
+        # しまう。深いコピーにする。
+        self.state = copy.deepcopy(self.DEFAULT)
         self._load()
 
     def _load(self):
@@ -1685,17 +1830,35 @@ class CalibStore:
                 with open(self.FILE_PATH, "r", encoding="utf-8") as f:
                     saved = json.load(f)
                 for key in ("1", "2"):
-                    if key in saved:
-                        self.state[key].update(saved[key])
-            except Exception:
-                pass
+                    patch = saved.get(key)
+                    if not isinstance(patch, dict):
+                        continue
+                    # 手で編集された/壊れた値をそのまま採用すると、配信画面の文字サイズが
+                    # NaNpxになって文字が消える (update() と同じ検証を通す)。
+                    for field in self.LIMITS:
+                        if field not in patch:
+                            continue
+                        try:
+                            if patch[field] is None and field == "heightCm":
+                                self.state[key][field] = None
+                            else:
+                                self.state[key][field] = self._validate(field, patch[field])
+                        except CalibValidationError:
+                            print(f"[警告] calib_state.json の {key}.{field} が不正な値のため読み飛ばしました: {patch[field]!r:.40}")
+            except Exception as e:
+                print(f"[警告] calib_state.json を読み込めませんでした (既定値で起動します): {e}")
 
     def _save(self):
+        # 書き込み途中にプロセスが落ちるとJSONが途切れ、次回起動時に
+        # キャリブレーションが黙って初期化されてしまうため、一時ファイルに
+        # 書いてから置き換える。
+        tmp_path = f"{self.FILE_PATH}.tmp"
         try:
-            with open(self.FILE_PATH, "w", encoding="utf-8") as f:
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(self.state, f, ensure_ascii=False)
-        except Exception:
-            pass
+            os.replace(tmp_path, self.FILE_PATH)
+        except Exception as e:
+            print(f"[警告] calib_state.json を保存できませんでした: {e}")
 
     def get(self):
         with self.lock:
@@ -1864,10 +2027,16 @@ def make_now_playing_server(
                 return None
             try:
                 raw = self.rfile.read(length) if length > 0 else b"{}"
-                return json.loads(raw.decode("utf-8"))
+                payload = json.loads(raw.decode("utf-8"))
             except Exception as e:
                 self._send_json({"error": str(e)}, status=400)
                 return None
+            # 呼び出し側は payload.get(...) を使うので、配列や数値だと AttributeError
+            # (500) になってしまう。ここで弾いて 400 を返す。
+            if not isinstance(payload, dict):
+                self._send_json({"error": "JSONオブジェクトで送ってください"}, status=400)
+                return None
+            return payload
 
         def do_OPTIONS(self):
             # プリフライトも同一オリジンのときだけ許可する。
@@ -2083,8 +2252,19 @@ def make_now_playing_server(
                     self.end_headers()
                     return
                 start_s, end_s = m.groups()
-                start = int(start_s) if start_s else 0
-                end = min(int(end_s), file_size - 1) if end_s else file_size - 1
+                if not start_s and not end_s:
+                    start, end = 1, 0  # "bytes=-" は不正 (下の416へ)
+                elif not start_s:
+                    # "bytes=-N" は「先頭からN」ではなく「末尾のNバイト」(RFC 7233)。
+                    # MP4のmoovが末尾にある動画などで、ブラウザがこの形式を使うことがある。
+                    suffix_len = int(end_s)
+                    start = max(0, file_size - suffix_len)
+                    end = file_size - 1
+                    if suffix_len == 0:
+                        start, end = 1, 0  # 0バイトの指定は満たせない
+                else:
+                    start = int(start_s)
+                    end = min(int(end_s), file_size - 1) if end_s else file_size - 1
                 if start > end or start >= file_size:
                     self.send_response(416)
                     self.send_header("Content-Range", f"bytes */{file_size}")
@@ -2485,6 +2665,25 @@ def main():
             else:
                 status_text = apply_command(player, queued_command, prefix="CMD", program=program)
 
+    def service_player():
+        """コマンドキューの処理・ライブラリ/次第ファイルの再読み込み・曲の自然終了の
+        後処理を1周ぶん行う (ハンドサインのループ・ヘッドレスのループ共通)。
+
+        本番中にここで想定外の例外(壊れたファイル等)が飛んでもプロセス全体を
+        落とさず、警告だけ出して進行を続ける。
+        """
+        try:
+            drain_command_queue()
+            player.reload_library_if_changed()
+            if program:
+                program.reload_playlists_if_changed()
+                program.reload_videos_if_changed()
+                program.tick()
+                player.allowed_ids = list(program.active_playlist_ids())
+            player.tick()
+        except Exception as e:
+            print(f"[エラー] 予期しない問題が発生しましたが、続行します: {e}")
+
     # ここから先で何が起きても、finally の後片付けは必ず走らせる。
     try:
         if args.hand_sign:
@@ -2502,6 +2701,7 @@ def main():
                 print("[エラー] カメラを開けませんでした。--camera の番号を確認してください。")
                 sys.exit(1)
 
+            read_failures = 0
             with mp_hands.Hands(
                 model_complexity=0,
                 min_detection_confidence=0.6,
@@ -2511,7 +2711,23 @@ def main():
                 while True:
                     ok, frame = cap.read()
                     if not ok:
-                        break
+                        # カメラが一瞬途切れた/USBが外れた。ここでループを抜けるとプロセスごと
+                        # 終了し、BGM再生・control.htmlからの操作・映像同期まで道連れに止まって
+                        # しまう。カメラ無しでも操作の受付(service_player)は続け、一定間隔で
+                        # 再接続を試みる。qキーでの終了はここでも効く。
+                        read_failures += 1
+                        if read_failures == 1:
+                            print("[警告] カメラの映像を取得できません。操作の受付は続け、再接続を試みます")
+                        service_player()
+                        if read_failures % 60 == 0:  # 約3秒ごと
+                            cap.release()
+                            cap = cv2.VideoCapture(args.camera)
+                        if cv2.waitKey(50) & 0xFF == ord("q"):
+                            break
+                        continue
+                    if read_failures:
+                        print("[INFO] カメラの映像が戻りました")
+                        read_failures = 0
 
                     try:
                         frame = cv2.flip(frame, 1)
@@ -2519,6 +2735,7 @@ def main():
                         result = hands.process(rgb)
                     except Exception as e:
                         print(f"[警告] カメラ画像の処理に失敗しました: {e}")
+                        service_player()  # 画像が処理できなくても、HTTP/音声からの操作は止めない
                         continue
 
                     # ジェスチャー判定〜再生操作。ここで例外が出るとループを抜けて
@@ -2533,24 +2750,18 @@ def main():
                             gesture = recognizer.recognize(hand_landmarks.landmark)
                             stable_gesture = recognizer.stabilize(gesture)
 
-                            if recognizer.fire(stable_gesture):
+                            # 手は映っているが判定が揺らいだフレーム(stable_gestureがNone)で
+                            # fire(None) を呼ぶと、直前の発火の記録(クールダウン)まで消えて
+                            # しまい、手をかざし続けているだけで再生/一時停止が連打される。
+                            # クールダウンを解除するのは、手が画面から外れたときだけにする。
+                            if stable_gesture is not None and recognizer.fire(stable_gesture):
                                 status_text = apply_command(player, stable_gesture, prefix="HAND", program=program)
                         else:
                             recognizer.stabilize(None)
                             recognizer.fire(None)
-
-                        drain_command_queue()
-                        player.reload_library_if_changed()
-                        if program:
-                            program.reload_playlists_if_changed()
-                            program.reload_videos_if_changed()
-                            program.tick()
-                            player.allowed_ids = list(program.active_playlist_ids())
-                        player.tick()
                     except Exception as e:
-                        # 本番中にここで想定外の例外(壊れたファイル等)が飛んでも
-                        # プロセス全体を落とさず、警告だけ出して進行を続ける。
-                        print(f"[エラー] 予期しない問題が発生しましたが、続行します: {e}")
+                        print(f"[エラー] ジェスチャーの処理に失敗しましたが、続行します: {e}")
+                    service_player()
 
                     # 画面にステータス表示 (日本語ファイル名も文字化けしないようPILで描画)
                     # 表示が作れなくても操作自体は続けられるべきなので、ここも保護する。
@@ -2595,19 +2806,7 @@ def main():
             print("[INFO] Ctrl+C で終了します。")
             try:
                 while True:
-                    try:
-                        drain_command_queue()
-                        player.reload_library_if_changed()
-                        if program:
-                            program.reload_playlists_if_changed()
-                            program.reload_videos_if_changed()
-                            program.tick()
-                            player.allowed_ids = list(program.active_playlist_ids())
-                        player.tick()
-                    except Exception as e:
-                        # 本番中にここで想定外の例外(壊れたファイル等)が飛んでも
-                        # プロセス全体を落とさず、警告だけ出して進行を続ける。
-                        print(f"[エラー] 予期しない問題が発生しましたが、続行します: {e}")
+                    service_player()
                     time.sleep(0.05)
             except KeyboardInterrupt:
                 pass

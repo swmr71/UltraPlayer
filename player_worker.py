@@ -45,6 +45,11 @@ def main():
 
     mixer_ready = False
 
+    try:
+        sys.stdin.reconfigure(encoding="utf-8")
+    except Exception:
+        pass  # 親側の送信はASCIIのみなので、変更できなくても支障はない
+
     for raw_line in sys.stdin:
         raw_line = raw_line.strip()
         if not raw_line:
@@ -99,7 +104,17 @@ def main():
             else:
                 _respond(req_id, False, error=f"不明なコマンドです: {cmd}")
         except Exception as e:
-            _respond(req_id, False, error=str(e))
+            # ミキサーが初期化されていない状態に陥った(音声デバイスの喪失等)場合は、
+            # 以降どのコマンドも失敗し続けるので「致命的」として親に知らせ、
+            # プロセスを再起動して初期化し直してもらう。単に曲が読めない等の
+            # 通常のエラーでは再起動させない。
+            fatal = False
+            if mixer_ready:
+                try:
+                    fatal = pygame.mixer.get_init() is None
+                except Exception:
+                    fatal = True
+            _respond(req_id, False, error=str(e), fatal=fatal)
 
 
 if __name__ == "__main__":
