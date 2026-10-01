@@ -107,6 +107,39 @@ fs.mkdirSync(TRACKS_DIR, { recursive: true });
 //   backfillDurations は非同期に走るため、その間のアップロード/メタ編集と
 //   衝突すると片方の更新が丸ごと消える。
 // ------------------------------------------------------------
+// JSON台帳 (配列) を読む。ファイルが無ければ空配列。
+// 壊れていて読めないとき、そのまま空配列を返すだけだと、画面から何か1つ保存した
+// 時点で空の状態が書き込まれ、壊れていたファイルの中身(手で書いた次第や
+// 曲の情報)が復旧できないまま消えてしまう。先に退避コピーを残してから空配列を返す。
+const backedUpCorrupt = new Set(); // 同じ壊れ方のファイルを読むたびに退避コピーが増えないように
+function readJsonList(file) {
+  if (!fs.existsSync(file)) return [];
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, "utf-8"));
+    if (Array.isArray(parsed)) return parsed;
+    throw new Error("配列ではありません");
+  } catch (e) {
+    let key = file;
+    try {
+      key = `${file}@${fs.statSync(file).mtimeMs}`;
+    } catch {}
+    if (!backedUpCorrupt.has(key)) {
+      backedUpCorrupt.add(key);
+      const backup = `${file}.corrupt-${Date.now()}`;
+      try {
+        fs.copyFileSync(file, backup);
+        console.error(
+          `[bgm-library] ${path.basename(file)} を読み込めません (${e.message})。空として扱います。` +
+            `元のファイルは ${path.basename(backup)} に退避しました`
+        );
+      } catch (copyErr) {
+        console.error(`[bgm-library] ${path.basename(file)} を読み込めず、退避にも失敗しました: ${copyErr.message}`);
+      }
+    }
+    return [];
+  }
+}
+
 function writeJsonAtomic(file, data) {
   const tmp = `${file}.tmp-${process.pid}`;
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2), "utf-8");
@@ -128,12 +161,7 @@ function withLock(fn) {
 // ライブラリ (tracks.json) の読み書き
 // ------------------------------------------------------------
 function loadLibrary() {
-  if (!fs.existsSync(LIBRARY_FILE)) return [];
-  try {
-    return JSON.parse(fs.readFileSync(LIBRARY_FILE, "utf-8"));
-  } catch {
-    return [];
-  }
+  return readJsonList(LIBRARY_FILE);
 }
 
 function saveLibrary(list) {
@@ -163,12 +191,7 @@ async function probeDurationSec(filePath) {
 // 行事の次第 (program.json) の読み書き
 // ------------------------------------------------------------
 function loadProgram() {
-  if (!fs.existsSync(PROGRAM_FILE)) return [];
-  try {
-    return JSON.parse(fs.readFileSync(PROGRAM_FILE, "utf-8"));
-  } catch {
-    return [];
-  }
+  return readJsonList(PROGRAM_FILE);
 }
 
 function saveProgram(items) {
@@ -180,12 +203,7 @@ function saveProgram(items) {
 // 名前付きの共通プレイリストを作成し、各演目の転換に付け外しで割り当てる。
 // ------------------------------------------------------------
 function loadPlaylists() {
-  if (!fs.existsSync(PLAYLISTS_FILE)) return [];
-  try {
-    return JSON.parse(fs.readFileSync(PLAYLISTS_FILE, "utf-8"));
-  } catch {
-    return [];
-  }
+  return readJsonList(PLAYLISTS_FILE);
 }
 
 function savePlaylists(list) {
@@ -198,12 +216,7 @@ function savePlaylists(list) {
 // TRACKS_DIR に保存し、/tracks-file で(音源と同様に)配信する。
 // ------------------------------------------------------------
 function loadVideos() {
-  if (!fs.existsSync(VIDEOS_FILE)) return [];
-  try {
-    return JSON.parse(fs.readFileSync(VIDEOS_FILE, "utf-8"));
-  } catch {
-    return [];
-  }
+  return readJsonList(VIDEOS_FILE);
 }
 
 function saveVideos(list) {
@@ -218,12 +231,7 @@ function saveVideos(list) {
 // 保存し、main.py側の /media/<filename> でそのまま配信できるようにする。
 // ------------------------------------------------------------
 function loadIemAudio() {
-  if (!fs.existsSync(IEM_AUDIO_FILE)) return [];
-  try {
-    return JSON.parse(fs.readFileSync(IEM_AUDIO_FILE, "utf-8"));
-  } catch {
-    return [];
-  }
+  return readJsonList(IEM_AUDIO_FILE);
 }
 
 function saveIemAudio(list) {
@@ -471,7 +479,9 @@ async function removeVocals(sourcePath, newId, onProgress) {
 // Express アプリ
 // ------------------------------------------------------------
 const app = express();
-app.use(express.json());
+// 既定の上限(100KB)だと、演目の多い次第 (1演目あたり数百バイト) を保存した
+// ときに 413 で失敗し、画面上は「保存に失敗しました」としか出ない。
+app.use(express.json({ limit: "5mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 app.use("/tracks-file", express.static(TRACKS_DIR)); // 試聴用に音源を配信
 

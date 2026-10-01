@@ -608,12 +608,26 @@ function renderLibrary() {
   body.querySelectorAll("input[data-field]").forEach(inp => {
     inp.addEventListener("change", async () => {
       const id = inp.dataset.id, field = inp.dataset.field;
-      await fetch(`/api/tracks/${id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ [field]: inp.value }),
-      });
-      await refreshLibrary();
+      try {
+        const res = await fetch(`/api/tracks/${id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ [field]: inp.value }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const updated = await res.json();
+        const i = library.findIndex(t => t.id === id);
+        if (i >= 0) library[i] = updated;
+        // 曲一覧の表(今まさに入力していた欄や、次にクリックするボタンを含む)は
+        // 再描画しない。Tabで次の欄へ移った直後/削除ボタンを押す直前に表ごと作り直すと、
+        // 入力途中の文字やクリックが失われる。曲名を参照する他の欄だけ更新する。
+        renderPlaylistManager();
+        renderProgram();
+        renderIemList();
+      } catch (e) {
+        alert(`曲情報の保存に失敗しました: ${(e && e.message) || e}`);
+        await refreshLibrary(); // 表示を保存済みの内容に戻す
+      }
     });
   });
   body.querySelectorAll("button[data-del]").forEach(btn => {
@@ -1376,17 +1390,23 @@ document.getElementById("btn-upload").addEventListener("click", async () => {
   fd.append("note", document.getElementById("f-note").value.trim());
 
   status.textContent = "アップロード中...";
-  const res = await fetch("/api/tracks", { method: "POST", body: fd });
-  const data = await res.json();
-  if (!res.ok) { status.textContent = `失敗: ${data.error}`; return; }
+  // 通信エラーや、JSONでない応答(プロキシのエラーページ等)で例外になると、
+  // 表示が「アップロード中...」のまま固まって成否が分からなくなるので必ず拾う。
+  try {
+    const res = await fetch("/api/tracks", { method: "POST", body: fd });
+    const data = await res.json();
+    if (!res.ok) { status.textContent = `失敗: ${data.error}`; return; }
 
-  status.textContent = "追加しました";
-  ["f-title", "f-author", "f-display", "f-note"].forEach(id => document.getElementById(id).value = "");
-  document.getElementById("f-arranged").checked = false;
-  fileInput.value = "";
-  document.getElementById("artist-search-results").innerHTML = "";
-  document.getElementById("artist-search-status").textContent = "";
-  await refreshLibrary();
+    status.textContent = "追加しました";
+    ["f-title", "f-author", "f-display", "f-note"].forEach(id => document.getElementById(id).value = "");
+    document.getElementById("f-arranged").checked = false;
+    fileInput.value = "";
+    document.getElementById("artist-search-results").innerHTML = "";
+    document.getElementById("artist-search-status").textContent = "";
+    await refreshLibrary();
+  } catch (e) {
+    status.textContent = "アップロードに失敗しました";
+  }
 });
 
 document.getElementById("btn-yt-video-info").addEventListener("click", async () => {
@@ -1445,14 +1465,18 @@ document.getElementById("btn-video-upload").addEventListener("click", async () =
   fd.append("displayTitle", document.getElementById("f-video-display").value.trim());
 
   status.textContent = "アップロード中...";
-  const res = await fetch("/api/videos", { method: "POST", body: fd });
-  const data = await res.json();
-  if (!res.ok) { status.textContent = `失敗: ${data.error}`; return; }
+  try {
+    const res = await fetch("/api/videos", { method: "POST", body: fd });
+    const data = await res.json();
+    if (!res.ok) { status.textContent = `失敗: ${data.error}`; return; }
 
-  status.textContent = "追加しました";
-  ["f-video-title", "f-video-display"].forEach(id => document.getElementById(id).value = "");
-  fileInput.value = "";
-  await refreshVideos();
+    status.textContent = "追加しました";
+    ["f-video-title", "f-video-display"].forEach(id => document.getElementById(id).value = "");
+    fileInput.value = "";
+    await refreshVideos();
+  } catch (e) {
+    status.textContent = "アップロードに失敗しました";
+  }
 });
 
 function escapeHtml(s) {
